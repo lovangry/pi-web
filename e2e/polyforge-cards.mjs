@@ -659,10 +659,11 @@ try {
   // not clipped (scrollWidth <= clientWidth + 1, and no ancestor up to the
   // card cuts its box) and the goal span (its `title` is the full goal) shows
   // a visible box inside the card. owner 有意变更:
-  // the Jobs stream is ONE row of fixed 150px cards that scrolls horizontally
-  // (the grid `repeat(auto-fill, minmax(150px, 1fr))` is gone), so every width
-  // shows the same one-row / 150px-card / scrollable shape; the card geometry
-  // stays pinned (no narration, 43px + the measured slug row),
+  // the Jobs stream's card presentation is now a wrapping grid of the same
+  // fixed 150px cells — two 76px rows visible by default, a further row
+  // scrolling under them, never a horizontal scroller (the vertical successor
+  // of the old one-row ruling) — and the card geometry stays pinned (no
+  // narration, 43px + the measured slug row),
   // with the card-A height bound stated against the measured slug row because
   // a 150px card wraps a 14-character slug.
   for (const [opts, label, measureHeight] of [[{ storage: { "pi-web:polyforge-dock-width": "460" } }, "460px dock", true],
@@ -736,59 +737,176 @@ try {
       assert.doesNotMatch(nonRunningText, /\b\d+m\b/, `${label}: a non-running card has no minutes suffix (${JSON.stringify(nonRunningText.slice(0, 60))})`);
       if (measureHeight) {
         // The docks (460px and 340px) measure card A's whole height. owner 有意变更
-        //（fix228-card-height， reverses the 32px
-        // narration）: no narration area, card-only padding 4px and no slug/goal
-        // gap, so — 2 border + 8 padding + slug row + 32 goal = 42 + slug row
-        // (58px for a one-line slug, 74px for the wrapped two-line row) — the
-        // bound is 43 + the measured slug row. The old 100px/117px card fails
-        // it, and so does one that only removed the narration (64px/80px).
+        //（pi#1's 卡片两行网格）: the card is now ONE fixed 76px cell — border +
+        // the 4px paddings + a 16px slug line + the 2×16px goal clamp, sized for
+        // the wrapped two-line slug row (74px) — superseding the old fix228
+        // bound (43px + the measured slug row ≤ 75px). Taller old cards
+        // (100px/117px, or the 64px/80px narration-less one) still fail it, and
+        // the grid's row math (76px cells, 176px two-row cap) depends on it.
         const cardHeight = await node.evaluate((el) => el.offsetHeight);
-        const bound = 43 + geometry.slugRow;
-        assert.ok(cardHeight <= bound, `${label}: card A is ${cardHeight}px, over the ${bound}px card geometry (43px + its ${geometry.slugRow}px slug row)`);
+        assert.equal(cardHeight, 76, `${label}: card A is the fixed 76px cell of the wrapping grid (${cardHeight}px)`);
       }
-      // one row of fixed 150px cards that scrolls left and right
-      // (old: N tracks of `repeat(auto-fill, minmax(150px, 1fr))` per width).
-      const row = await node.evaluate((el) => {
+      // (pi#1's intentional change, not a regression): the Jobs stream's card
+      // presentation is now a wrapping grid of the same fixed 150px cells —
+      // two rows visible by default (maxHeight 176 = 2×76 + 8 + 16), a further
+      // row scrolling under them — so no width ever scrolls horizontally
+      // (overflowX hidden, the vertical successor of the old one-row ruling).
+      const grid = await node.evaluate((el) => {
         const container = el.parentElement;
-        const box = el.getBoundingClientRect();
-        return { width: box.width, basis: getComputedStyle(el).flexBasis, gap: getComputedStyle(container).gap,
+        const cards = [...container.querySelectorAll("[data-pf-card-wi]")];
+        const style = getComputedStyle(container);
+        const rows = [...new Set(cards.map((card) => Math.round(card.getBoundingClientRect().y)))];
+        return {
+          width: el.getBoundingClientRect().width, height: el.offsetHeight, basis: getComputedStyle(el).flexBasis, containerBasis: style.flexBasis, gap: style.gap,
           clientWidth: container.clientWidth, scrollWidth: container.scrollWidth,
-          overflowX: getComputedStyle(container).overflowX, scrollbarWidth: getComputedStyle(container).scrollbarWidth };
+          clientHeight: container.clientHeight, scrollHeight: container.scrollHeight,
+          maxHeight: style.maxHeight, overflowX: style.overflowX, overflowY: style.overflowY,
+          scrollbarWidth: style.scrollbarWidth, rows: rows.length,
+          heights: [...new Set(cards.map((card) => card.offsetHeight))],
+        };
       });
-      assert.ok(Math.abs(row.width - 150) <= 0.5, `${label}: a job card is a fixed 150px wide (${row.width})`);
-      assert.equal(row.basis, "150px", `${label}: the card width is the 150px flex basis, not a stretched track (${row.basis})`);
-      assert.equal(row.gap, "8px", `${label}: the card gap is the unchanged 8px (${row.gap})`);
-      assert.equal(row.overflowX, "auto", `${label}: the card row scrolls horizontally (${row.overflowX})`);
-      assert.equal(row.scrollbarWidth, "thin", `${label}: the row's scrollbar stays visible but thin (${row.scrollbarWidth})`);
-      assert.ok(row.scrollWidth > row.clientWidth, `${label}: the row overflows and can be scrolled (${row.scrollWidth}/${row.clientWidth})`);
+      assert.ok(Math.abs(grid.width - 150) <= 0.5, `${label}: a job card is a fixed 150px wide (${grid.width})`);
+      assert.equal(grid.basis, "150px", `${label}: the card is the fixed 150px flex basis, not a stretched track (${grid.basis})`);
+      assert.equal(grid.containerBasis, "auto", `${label}: the wrapping grid sizes to its queue block, not a fixed-basis track (${grid.containerBasis})`);
+      assert.equal(grid.gap, "8px", `${label}: the card gap is the unchanged 8px (${grid.gap})`);
+      assert.deepEqual(grid.heights, [76], `${label}: every card is exactly the fixed 76px cell (${JSON.stringify(grid.heights)})`);
+      assert.equal(grid.overflowX, "hidden", `${label}: the card grid never scrolls horizontally (${grid.overflowX})`);
+      assert.equal(grid.overflowY, "auto", `${label}: the card grid scrolls vertically (${grid.overflowY})`);
+      assert.equal(grid.scrollbarWidth, "thin", `${label}: the grid's scrollbar stays visible but thin (${grid.scrollbarWidth})`);
+      assert.equal(grid.maxHeight, "176px", `${label}: the visible cap is two 76px rows plus gap and padding (${grid.maxHeight})`);
+      assert.ok(grid.rows >= 2, `${label}: the cards wrap into rows at this width (${grid.rows} rows)`);
+      const content = grid.rows * 76 + (grid.rows - 1) * 8 + 16;
+      assert.ok(Math.abs(grid.scrollHeight - content) <= 1, `${label}: the ${grid.rows} wrapped rows measure exactly 76px cells + 8px gaps + padding (${grid.scrollHeight}/${content})`);
+      assert.ok(grid.clientHeight <= 176, `${label}: the grid never shows more than the two-row cap (${grid.clientHeight})`);
+      if (grid.rows > 2) {
+        // the further rows scroll under the two visible ones
+        assert.ok(grid.scrollHeight > grid.clientHeight, `${label}: a ${grid.rows}-row grid overflows the two-row cap and scrolls (${grid.scrollHeight}/${grid.clientHeight})`);
+        assert.equal(grid.clientHeight, 176, `${label}: the scroller itself holds the two-row cap (${grid.clientHeight})`);
+      } else {
+        assert.ok(grid.scrollHeight <= grid.clientHeight + 1, `${label}: a ${grid.rows}-row grid needs no scroll (${grid.scrollHeight}/${grid.clientHeight})`);
+      }
       const shape = await dock(page).locator("[data-pf-card-wi]").evaluateAll((nodes) => ({
         rows: new Set(nodes.map((el) => Math.round(el.getBoundingClientRect().y))).size,
         widths: nodes.map((el) => el.getBoundingClientRect().width),
         order: nodes.map((el) => el.getAttribute("data-pf-card-wi")),
       }));
-      assert.equal(shape.rows, 1, `${label}: every job card sits on one row (${JSON.stringify(shape)})`);
+      assert.equal(shape.rows, grid.rows, `${label}: every job card sits on a wrapped row (${JSON.stringify(shape)})`);
       assert.ok(shape.widths.every((width) => Math.abs(width - 150) <= 0.5), `${label}: every card is 150px wide (${JSON.stringify(shape.widths)})`);
       assert.equal(new Set(shape.order).size, shape.order.length, `${label}: the cards keep one DOM node each (${JSON.stringify(shape.order)})`);
-      // Scrolled to the row's end the last card is fully visible (its box inside
-      // the row's viewport, nothing clipped) and the row has really moved.
+      // Scrolled to the grid's end the last card is fully visible (its box inside
+      // the grid's viewport, nothing clipped) and the grid has really moved.
       const end = await node.evaluate((el) => {
         const container = el.parentElement;
-        container.scrollLeft = container.scrollWidth;
+        container.scrollTop = container.scrollHeight;
         const cards = [...container.querySelectorAll("[data-pf-card-wi]")];
         const last = cards.at(-1).getBoundingClientRect(); const clip = container.getBoundingClientRect();
-        return { scrollLeft: container.scrollLeft, lastLeft: last.left, lastRight: last.right, clipLeft: clip.left, clipRight: clip.right };
+        return { scrollTop: container.scrollTop, lastTop: last.top, lastBottom: last.bottom, clipTop: clip.top, clipBottom: clip.bottom };
       });
-      assert.ok(end.scrollLeft > 0, `${label}: the card row scrolls to the end (${end.scrollLeft})`);
-      assert.ok(end.lastRight <= end.clipRight + 1 && end.lastLeft >= end.clipLeft - 1,
-        `${label}: scrolled to the end the last card is fully visible (${JSON.stringify(end)})`);
-      // the 3 s card poll never resets the row's scroll position
+      if (grid.rows > 2) {
+        assert.ok(end.scrollTop > 0, `${label}: the card grid scrolls to the end (${end.scrollTop})`);
+        assert.ok(end.lastBottom <= end.clipBottom + 1 && end.lastTop >= end.clipTop - 1,
+          `${label}: scrolled to the end the last card is fully visible (${JSON.stringify(end)})`);
+      }
+      // the 3 s card poll never resets the grid's scroll position
       // (the cards keep their keys, so nothing re-mounts).
       const polls = page.__cardRequests.length;
       await waitFor(() => page.__cardRequests.length >= polls + 2, "two card polls after the scroll", 20_000);
-      const after = await node.evaluate((el) => el.parentElement.scrollLeft);
-      assert.ok(Math.abs(after - end.scrollLeft) <= 1, `${label}: a card poll keeps the scroll position (${after}/${end.scrollLeft})`);
+      const after = await node.evaluate((el) => el.parentElement.scrollTop);
+      assert.ok(Math.abs(after - end.scrollTop) <= 1, `${label}: a card poll keeps the scroll position (${after}/${end.scrollTop})`);
     }));
   }
+
+  // S19 (pi#1's 列表视图): the queue header's two icon buttons switch the
+  // Jobs stream between the card grid and one compact row per job. The
+  // card grid stays the default; the list rows keep the card stream's
+  // order and selection semantics (click and Enter) on the same read face,
+  // the choice is held under `pi-web:polyforge-queue-view`, and with a job
+  // selected the queue block caps at 45% of the detail's scroll region so
+  // the stream never competes with the detail for the scroller.
+  await check("S19", () => withPage({}, async (page) => {
+    setOps([T, C, B, A]); writeTranscripts();
+    await openDock(page);
+    const listView = dock(page).locator('[data-pf-queue-view="list"]');
+    const cardView = dock(page).locator('[data-pf-queue-view="card"]');
+    await cardView.waitFor({ timeout: 30_000 });
+    assert.equal(await cardView.getAttribute("aria-pressed"), "true", "the card view is the default presentation");
+    assert.equal(await listView.getAttribute("aria-pressed"), "false", "the list view starts unpressed");
+    await card(page, A.work_item_id).waitFor({ timeout: 30_000 });
+    assert.equal(await dock(page).locator("[data-pf-job-row]").count(), 0, "no list row renders in the card view");
+    await listView.click();
+    const rows = dock(page).locator("[data-pf-job-row]");
+    await waitFor(async () => (await rows.count()) === 4, "the four list rows render");
+    assert.equal(await dock(page).locator("[data-pf-card-wi]").count(), 0, "switching to the list view unmounts the cards");
+    assert.equal(await listView.getAttribute("aria-pressed"), "true", "the list view is now pressed");
+    const shape = await rows.evaluateAll((nodes) => {
+      const container = nodes[0].parentElement;
+      return {
+        keys: nodes.map((el) => el.getAttribute("data-pf-job-row")),
+        pressed: nodes.map((el) => el.getAttribute("aria-pressed")),
+        roles: nodes.map((el) => el.getAttribute("role")),
+        widths: nodes.map((el) => Math.round(el.getBoundingClientRect().width)),
+        heights: nodes.map((el) => Math.round(el.getBoundingClientRect().height)),
+        dots: nodes.map((el) => Math.round(el.querySelector("span").getBoundingClientRect().width)),
+        containerWidth: container.clientWidth,
+        scroll: getComputedStyle(container).overflowY,
+      };
+    });
+    assert.equal(new Set(shape.keys).size, 4, `the rows keep one DOM node each, keyed by the card identity (${JSON.stringify(shape.keys)})`);
+    assert.deepEqual(shape.pressed, ["false", "false", "false", "false"], "no row is selected yet");
+    assert.deepEqual(shape.roles, ["button", "button", "button", "button"], "each row is a button");
+    assert.ok(shape.heights.every((height) => height >= 24 && height <= 28), `each row is one compact single-line height — 4px padding + one 12px line + 4px (${JSON.stringify(shape.heights)})`);
+    assert.ok(shape.dots.every((dot) => dot === 7), `each row carries its 7px status dot (${JSON.stringify(shape.dots)})`);
+    assert.ok(shape.widths.every((width) => width >= shape.containerWidth - 2), `each row spans the whole stream width (${JSON.stringify(shape.widths)}/${shape.containerWidth})`);
+    assert.equal(shape.scroll, "auto", `the list keeps its own vertical scroller (${shape.scroll})`);
+    // the needs_input row's label reads amber and bold, the running row's
+    // label carries the job's age in whole minutes (the shared card hooks)
+    const labels = await rows.evaluateAll((nodes) => nodes.map((el) => {
+      const label = [...el.querySelectorAll("span")].find((span) => span.children.length === 0 && /needs input|running/i.test((span.textContent ?? "")));
+      return label ? { text: label.textContent ?? "", color: getComputedStyle(label).color, weight: getComputedStyle(label).fontWeight } : null;
+    }));
+    const needsInput = labels.find((label) => /needs input/i.test(label?.text ?? ""));
+    assert.ok(needsInput, `the needs_input row's status label renders (${JSON.stringify(labels)})`);
+    assert.equal(needsInput.color, "rgb(217, 119, 6)", `the needs_input label is amber (${needsInput.color})`);
+    assert.equal(needsInput.weight, "600", `the needs_input label is bold (${needsInput.weight})`);
+    const running = labels.find((label) => /running/i.test(label?.text ?? ""));
+    assert.match(running?.text ?? "", /Running \d+m/, `the running row's label carries the job's age in whole minutes (${JSON.stringify(labels)})`);
+    // Enter selects a row exactly like a click; with a selection the queue
+    // block yields to the detail — its 45% cap is measured against the panel
+    // body column that holds BOTH the queue block and the detail's own scroll
+    // region as siblings (the queue stream never sits above the detail's
+    // scroller in the DOM), and the block itself stays overflow:hidden.
+    await rows.nth(1).focus();
+    await page.keyboard.press("Enter");
+    await dock(page).getByRole("button", { name: /back to job list|deselect/i }).waitFor({ timeout: 10_000 });
+    assert.equal(await rows.nth(1).getAttribute("aria-pressed"), "true", "the focused row is selected");
+    const caps = await rows.nth(1).evaluate((el) => {
+      const block = el.parentElement.parentElement;
+      const body = block.parentElement;
+      const detail = [...body.children].find((child) => child.hasAttribute("data-pf-detail-scroll")) ?? null;
+      return { block: block.getBoundingClientRect().height, body: body.getBoundingClientRect().height,
+        detail: detail ? detail.getBoundingClientRect().height : null,
+        beside: detail ? detail.previousElementSibling === block : false,
+        blockOverflow: getComputedStyle(block).overflow, detailOverflow: detail ? getComputedStyle(detail).overflowY : null };
+    });
+    assert.ok(caps.detail !== null, "the detail's scroll region renders under the queue block");
+    assert.ok(caps.beside, "the queue block sits beside the detail's scroll region, not above it in its scroller");
+    assert.ok(caps.block <= caps.body * 0.45 + 1.5, `with a selection the queue block caps at 45% of the panel body (${caps.block}/${caps.body})`);
+    assert.equal(caps.blockOverflow, "hidden", `the queue block itself never scrolls (${caps.blockOverflow})`);
+    assert.equal(caps.detailOverflow, "auto", `the detail keeps its own scroll region (${caps.detailOverflow})`);
+    // the choice is browser-held and survives a reload
+    assert.equal(await page.evaluate(() => localStorage.getItem("pi-web:polyforge-queue-view")), "list", "the choice is held in storage");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByText("E2E pf cards host session").first().waitFor({ state: "attached", timeout: NAV_MS });
+    await openDock(page);
+    await waitFor(async () => (await dock(page).locator("[data-pf-job-row]").count()) === 4, "the stored list view renders after the reload");
+    assert.equal(await dock(page).locator("[data-pf-card-wi]").count(), 0, "the stored list view stays the list view");
+    assert.equal(await cardView.getAttribute("aria-pressed"), "false", "the card view stays unpressed after the reload");
+    // and the toggle back restores the card grid on the same read face
+    await cardView.click();
+    await waitFor(async () => (await dock(page).locator("[data-pf-card-wi]").count()) === 4, "the card grid renders again");
+    assert.equal(await dock(page).locator("[data-pf-job-row]").count(), 0, "switching back to the card view unmounts the rows");
+    assert.equal(await cardView.getAttribute("aria-pressed"), "true", "the card view is pressed again");
+  }));
 } catch (error) {
   failures.push("suite");
   console.log(`FAIL suite: ${String(error?.message ?? error).split("\n")[0]}`);

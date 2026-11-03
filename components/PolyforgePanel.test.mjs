@@ -40,7 +40,11 @@ test("candidate shortening: >24 chars become the first 24 + ellipsis, nothing el
 
 test("job rows show slug and status label; candidate and ages live in the detail; the queue badge stays", () => {
   assert.match(source, /\{job\.slug\}/);
-  assert.match(source, /jobStatusLabel\(job\.status\)/);
+  // pi#1: the status label (with its running age) is the shared hook both
+  // the card and the list row render.
+  assert.match(source, /function useJobStatusLabel\(job: PolyforgeJob, startedAt: string \| undefined\): string \{/);
+  assert.match(source, /const base = JOB_STATUS_KEYS\.has\(job\.status\) \? t\(`polyforge\.jobStatus\.\$\{job\.status\}`\) : job\.status;/);
+  assert.match(source, /return runningMinutes === null \? base : `\$\{base\} \$\{runningMinutes\}m`;/, "the running age rides the same label");
   const cardSource0 = source.slice(source.indexOf("const PolyforgeJobCard = memo("), source.indexOf("export function PolyforgePanel("));
   assert.doesNotMatch(cardSource0, /job\.spawnN|job\.candidate|job\.stepAgeSec|job\.idleAgeSec/, "the card no longer carries #spawnN, model or ages");
   assert.match(source, /\{selectedJob\.candidate \? shortenCandidate\(selectedJob\.candidate\) : "—"\}/, "the detail shows the model, shortened as the card did");
@@ -52,7 +56,7 @@ test("job rows show slug and status label; candidate and ages live in the detail
   // wholesale. (pi#117: the DETAIL now shows the sanitized chat origin —
   // `owner` exists in the panel — so the no-filter guarantee is pinned on
   // the job-list block, not the whole file.)
-  const jobListStart = source.indexOf("{/* Queue line + job card stream");
+  const jobListStart = source.indexOf("{/* Queue line + job stream");
   const jobListEnd = source.indexOf("{/* Detail for the selected work item */}");
   assert.ok(jobListStart >= 0 && jobListEnd > jobListStart, "job list block boundaries");
   const jobList = source.slice(jobListStart, jobListEnd);
@@ -63,8 +67,7 @@ test("job rows show slug and status label; candidate and ages live in the detail
   assert.ok(cardStart >= 0, "the card component exists");
   const cardSource = source.slice(cardStart, source.indexOf("export function PolyforgePanel("));
   assert.doesNotMatch(cardSource, /owner/, "a card never filters by owner");
-  assert.match(cardSource, /const baseStatusLabel = jobStatusLabel\(job\.status\);/);
-  assert.match(cardSource, /runningMinutes === null \? baseStatusLabel : `\$\{baseStatusLabel\} \$\{runningMinutes\}m`/, "the running age rides the same label");
+  assert.match(cardSource, /useJobStatusLabel\(job, card\.startedAt\)/, "the card labels from the card's earliest job_started");
 });
 
 test("the detail shows the flow graph and status-only blocked rendering, with no step-chip block and no event tail", () => {
@@ -521,8 +524,11 @@ test("pi#120/#238: with a job selected, the whole detail is ONE vertical scroll 
   // scroll region and visible: the detail container starts inside the body.
   const bodyStart = source.indexOf("{/* Body */}");
   assert.ok(bodyStart >= 0 && bodyStart < detailStart, "the body split precedes the detail");
-  // The job list keeps its own scroller above the detail (unchanged).
-  assert.match(source, /maxHeight: selectedWi \? "45%" : "100%", overflowY: "auto"/, "the job list keeps its own scroller (the whole body until a selection)");
+  // pi#1 (PC 版优化， ticket pi-web#1): the queue block caps at 45% once a
+  // job is selected but never scrolls itself — the card grid and the list
+  // each keep their own stream scroller above the detail, so the block's
+  // hidden overflow can never eat a scroll.
+  assert.match(source, /maxHeight: selectedWi \? "45%" : "100%", display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", borderBottom: "1px solid var\(--border\)"/, "the queue block caps at 45% with a detail, but never scrolls itself");
   // Horizontal behavior is unchanged: the graph still wraps (no horizontal
   // scroll) — the graph container keeps its overflow-hidden wrap container.
   assert.match(source, /flexWrap: "wrap", alignItems: "center", rowGap: 6/, "the graph node row still wraps");
@@ -541,7 +547,7 @@ test("the dock adds Jobs | Messages tabs with an unread dot of its own", () => {
 });
 
 test("the Jobs content is unchanged behind the tab switch", () => {
-  const jobListStart = source.indexOf("{/* Queue line + job card stream");
+  const jobListStart = source.indexOf("{/* Queue line + job stream");
   const jobListEnd = source.indexOf("{/* Detail for the selected work item */}");
   assert.ok(jobListStart >= 0 && jobListEnd > jobListStart, "the Jobs body keeps its block markers");
   const jobs = source.slice(jobListStart, jobListEnd);
@@ -568,26 +574,47 @@ test("/#163/#173: each card has a stable key and test identity, toggles the exis
   assert.doesNotMatch(card, /onClick=\{toggle\}/, "no unconditional click handler remains");
   assert.match(source, /selected=\{selectedWi === card\.job\.slug \|\| selectedWi === card\.job\.wi\}/, "selection is the slug ref, or the wi id an anchor names");
   // one block style, cards side by side, never a full-width
-  // row. owner 有意变更（重立于 #213）：the Jobs cards are one
-  // horizontally scrolling row of fixed 150px cards — the Tasks blocks' column
-  // minimum (#213), no longer a wrapping grid whose tracks stretch.
+  // row. owner 有意变更（pi#1 卡片视图）：the Jobs cards wrap into rows of the
+  // fixed 150px cells — two rows visible by default, a further row scrolls
+  // under them — no longer one horizontally scrolling row, and never a
+  // stretched grid track either.
   assert.match(source, /import \{ POLYFORGE_BLOCK_STYLE \} from "@\/lib\/panel-layout";/);
   // owner 有意变更 the card's outer column gap is 4 (was 6).
   assert.match(card, /display: "flex", flexDirection: "column", gap: 4, minWidth: 0,/, "the card column gap is 4");
   assert.doesNotMatch(card, /width: "100%"/, "a card is a fixed-width item, not a full-width block");
   assert.match(source, /const JOB_CARD_WIDTH = 150;/, "the fixed card width is the 150px the Tasks tracks share (/#220)");
   assert.match(card, /flex: `0 0 \$\{JOB_CARD_WIDTH\}px`/, "the card width is a non-shrinking 150px flex basis");
-  assert.match(source, /<div style=\{\{ display: "flex", flexWrap: "nowrap", gap: 8, padding: 8, overflowX: "auto", scrollbarWidth: "thin" \}\}>\s*\{shownCards\.map/,
-    "the Jobs stream is one row that scrolls horizontally, gap and padding unchanged");
+  assert.match(source, /<div style=\{\{ display: "flex", flexWrap: "wrap", gap: JOB_CARD_GAP, padding: JOB_CARD_STREAM_PADDING, overflowX: "hidden", overflowY: "auto", scrollbarWidth: "thin", maxHeight: jobCardStreamMaxHeight\(\), flex: "0 1 auto", minHeight: 0 \}\}>\s*\{shownCards\.map/,
+    "the card grid wraps, two rows visible, further rows scroll under them (pi#1)");
+  // pi#1: one fixed height per card, so the card view's "two rows" are
+  // exactly two; a longer slug clamps to its two lines instead of pushing
+  // the goal out (the full slug is on hover).
+  assert.match(source, /const JOB_CARD_HEIGHT = 76;/, "the fixed card height is the 4+16+32+4 box");
+  assert.match(source, /const JOB_CARD_ROWS = 2;/, "the card view shows two rows by default");
+  assert.match(card, /height: JOB_CARD_HEIGHT,/, "a card is a fixed 76px cell of the grid");
+  assert.match(card, /<div title=\{job\.slug\} style=\{\{ flex: "1 1 0", minWidth: 0, [^}]*WebkitLineClamp: 2[^}]*\}\}>\{job\.slug\}<\/div>/, "the slug wraps at most two lines, full on hover");
+  assert.match(source, /export function jobCardStreamMaxHeight\(\): number \{\s*return JOB_CARD_ROWS \* JOB_CARD_HEIGHT \+ \(JOB_CARD_ROWS - 1\) \* JOB_CARD_GAP \+ 2 \* JOB_CARD_STREAM_PADDING;\s*\}/, "the stream cap is two card rows, their gap and the stream padding");
   assert.match(source, /scrollbarWidth: "thin"/, "the scrollbar stays visible but thin");
   assert.doesNotMatch(source, /gridTemplateColumns: "repeat\(auto-fill, minmax\(\d+px, 1fr\)\)"/, "the Jobs stream is no longer a wrapping grid");
+  // pi#1's list view: one compact row per job — the status dot, the slug,
+  // the status label and the truncated goal on one line — the stream's own
+  // scroller under the header, the same selection as the card.
+  const jobRow = source.slice(source.indexOf("const PolyforgeJobRow = memo(function PolyforgeJobRow"), source.indexOf("export function PolyforgePanel("));
+  assert.ok(jobRow.length > 0, "the list view renders one row component");
+  assert.match(source, /queueView === "card" \? \(/, "the card grid is one presentation of the stream");
+  assert.match(source, /\) : \([^<]*<div style=\{\{ flex: "1 1 0", minHeight: 0, overflowY: "auto", scrollbarWidth: "thin"[^}]*\}\}>\s*\{shownCards\.map/, "the list view is the other presentation, its own scroller under the header");
+  assert.match(jobRow, /data-pf-job-row=\{pending \? undefined : polyforgeCardKey\(card\)\}/, "a list row is keyed by the card's wi");
+  assert.match(jobRow, /background: jobStatusColor\(job\.status\)/, "the row's dot carries the job status");
+  assert.match(jobRow, /whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"/, "the row's text is one ellipsized line");
+  assert.match(jobRow, /onSelect\(selected \? null : job\.slug\)/, "the row toggles the same slug selection");
+  assert.match(source, /export function jobStatusColor\(status: string\): string \{/, "the status colour map is the pure exported function");
   // Title (s14#2,): the slug (wrapping) and the status at the
   // right end of the same row, the truncated goal under them clamped to 2
   // lines (full goal on hover). The status may ellipsize (flex 0 1 auto,
   // at most 60%) but never squeezes the slug (flex 1 1 0, wraps anywhere).
   const titleRow = card.slice(card.indexOf('<div style={{ display: "flex", alignItems: "flex-start", gap: 6, minWidth: 0 }}>'), card.indexOf("{goal && ("));
   assert.ok(titleRow.length > 0, "one title row holds slug and status");
-  assert.match(titleRow, /<div style=\{\{ flex: "1 1 0", minWidth: 0, [^}]*overflowWrap: "anywhere"[^}]*\}\}>\{job\.slug\}<\/div>/);
+  assert.match(titleRow, /<div title=\{job\.slug\} style=\{\{ flex: "1 1 0", minWidth: 0, [^}]*overflowWrap: "anywhere"[^}]*\}\}>\{job\.slug\}<\/div>/);
   assert.match(titleRow, /\{needsInput \? \(\s*<div data-pf-needs-input=""/, "the needs-input marker sits on the slug's row");
   assert.match(titleRow, /\) : \(\s*<div style=\{\{ flex: "0 1 auto", minWidth: 0, maxWidth: "60%"[^}]*\}\}>\{statusLabel\}<\/div>/, "the dim status label sits on the slug's row");
   assert.match(card, /<span title=\{goal\} style=\{\{[^}]*lineHeight: "16px"[^}]*WebkitLineClamp: 2[^}]*\}\}>\{truncateCardTitle\(goal, titleLength\)\}<\/span>/);
@@ -595,7 +622,7 @@ test("/#163/#173: each card has a stable key and test identity, toggles the exis
   // span, so the inherited 18px (line-height 1.5 at 12px) no longer inflates
   // the card; the needs-input badge fits a 16px row (14px line + 1px border)
   // and the dim status label stays 16px.
-  assert.match(titleRow, /<div style=\{\{ flex: "1 1 0", minWidth: 0, [^}]*lineHeight: "16px"[^}]*\}\}>\{job\.slug\}<\/div>/, "the slug row is a 16px line");
+  assert.match(titleRow, /<div title=\{job\.slug\} style=\{\{ flex: "1 1 0", minWidth: 0, [^}]*lineHeight: "16px"[^}]*\}\}>\{job\.slug\}<\/div>/, "the slug row is a 16px line");
   assert.match(titleRow, /data-pf-needs-input="" style=\{\{[^}]*padding: "0 5px"[^}]*lineHeight: "14px"[^}]*\}\}/, "the needs-input badge is padding 0 5px / line-height 14px, so its row is 16px with the border");
   assert.match(titleRow, /\) : \(\s*<div style=\{\{ flex: "0 1 auto", minWidth: 0, maxWidth: "60%", fontSize: 11, lineHeight: "16px", color: "var\(--text-dim\)"/, "the dim status label is on a 16px line");
   assert.ok(card.indexOf("{goal && (") > card.indexOf("{statusLabel}</div>"), "the goal comes below the slug/status row");
@@ -633,10 +660,14 @@ test("/#163/#173: each card has a stable key and test identity, toggles the exis
   // earliest job_started and a local render clock (no request); a missing
   // startedAt or any other status keeps the bare label.
   assert.match(source, /import \{[\s\S]*?\bcardRunningMinutes,/, "the age comes from the pure cards helper");
-  assert.match(card, /const runningMinutes = running \? cardRunningMinutes\(card\.startedAt, now\) : null;/, "only a running card reads an age, from startedAt");
-  assert.match(card, /const statusLabel = runningMinutes === null \? baseStatusLabel : `\$\{baseStatusLabel\} \$\{runningMinutes\}m`;/, "the label is `<label> <n>m`, bare without a readable age");
-  assert.match(card, /const \[now, setNow\] = useState\(\(\) => Date\.now\(\)\);/);
-  assert.match(card, /if \(!running\) return;\s*const clock = setInterval\(\(\) => setNow\(Date\.now\(\)\), 30_000\);\s*return \(\) => clearInterval\(clock\);/, "a 30s local render clock, never a poll");
+  // pi#1: the age logic moved into the shared useJobStatusLabel hook both
+  // the card and the list row render (same contract: only a running job
+  // reads an age, from the card's earliest job_started, a local render
+  // clock, never a poll).
+  assert.match(source, /function useRunningMinutes\(startedAt: string \| undefined, running: boolean\): number \| null \{/, "the running age hook is shared by the card and the row");
+  assert.match(source, /return running \? cardRunningMinutes\(startedAt, now\) : null;/, "only a running card reads an age, from startedAt");
+  assert.match(source, /const \[now, setNow\] = useState\(\(\) => Date\.now\(\)\);/);
+  assert.match(source, /if \(!running\) return;\s*const clock = setInterval\(\(\) => setNow\(Date\.now\(\)\), 30_000\);\s*return \(\) => clearInterval\(clock\);/, "a 30s local render clock, never a poll");
   for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
     assert.doesNotMatch(localeSource, /"polyforge\.card\.(?:noProgress|progressUnavailable)":/, `${name} drops the card-only narration placeholders`);
   }
@@ -852,8 +883,28 @@ test("the progress section renders each stream line inline as one ellipsized lin
   assert.match(block, /!wi \|\| snapshot\?\.available === false \? t\("polyforge\.progress\.unavailable"\)/, "nothing readable: the unavailable state, no fabricated line");
   assert.match(block, /: !snapshot \? t\("polyforge\.loading"\)/, "Loading only until the first read settles");
   assert.match(block, /snapshot\.lines\.length === 0 \? t\("polyforge\.progress\.empty"\)/);
-  assert.match(block, /snapshot\.omitted > 0 && \(\s*<span data-pf-progress-omitted="" [^>]*>\{t\("polyforge\.progress\.omitted", \{ count: snapshot\.omitted \}\)\}<\/span>/, "the omitted marker carries the exact count, before the lines");
-  assert.match(block, /snapshot\.lines\.map\(\(line\) => \(\s*<div\s*key=\{line\.id\}\s*data-pf-progress-kind=\{line\.kind\}\s*data-pf-progress-tone=\{line\.kind === "event" \? \(line\.tone \?\? "neutral"\) : undefined\}\s*title=\{line\.event \? `\$\{line\.event\}\\n\$\{line\.text\}` : line\.text\}\s*style=\{\{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"/, "one line per stream line, the raw kind and full text on hover");
+  // pi#1 (排序): newest first by default (the render reverses the
+  // snapshot's oldest-first wire order), oldest first at the toggle — the
+  // marker stays at the oldest end in both.
+  assert.match(block, /const \{ progressOrder, setProgressOrder \} = usePolyforgeViewPreferences\(\);/, "the order is the stored preference");
+  assert.match(block, /data-pf-progress-order=""/, "the order control sits on the heading");
+  assert.match(block, /aria-pressed=\{progressOrder === "desc"\}/, "the control is pressed while newest first");
+  assert.match(block, /setProgressOrder\(progressOrder === "desc" \? "asc" : "desc"\)/, "a click flips the order");
+  assert.match(block, /const ordered = useMemo\(\s*\(\) => \(snapshot && progressOrder === "desc" \? \[\.\.\.snapshot\.lines\]\.reverse\(\) : \(snapshot\?\.lines \?\? \[\]\)\),\s*\[snapshot, progressOrder\],\s*\);/, "newest first reverses only the render order, the snapshot stays oldest first");
+  assert.match(block, /progressOrder === "asc" && snapshot\.omitted > 0 && \(\s*<span data-pf-progress-omitted="" [^>]*>\{t\("polyforge\.progress\.omitted", \{ count: snapshot\.omitted \}\)\}<\/span>/, "the omitted marker carries the exact count, at the oldest end above the lines");
+  assert.match(block, /progressOrder === "desc" && snapshot\.omitted > 0 && \(\s*<span data-pf-progress-omitted=""/, "newest first it sits below the lines");
+  assert.match(block, /ordered\.map\(\(line\) =>\s*line\.detail === undefined \? \(/, "a line without a fold renders directly");
+  assert.match(block, /<div\s*key=\{line\.id\}\s*data-pf-progress-kind=\{line\.kind\}\s*data-pf-progress-tone=\{line\.kind === "event" \? \(line\.tone \?\? "neutral"\) : undefined\}\s*title=\{line\.event \? `\$\{line\.event\}\\n\$\{line\.text\}` : line\.text\}\s*style=\{\{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"/, "one line per stream line, the raw kind and full text on hover");
+  // pi#1 (折叠): a tool or thinking line folds — one header line (the full
+  // text on hover), the masked detail expands in place under it, collapsed
+  // by default; the fold's ids survive a poll, another job starts folded.
+  assert.match(block, /<div key=\{line\.id\} data-pf-progress-kind=\{line\.kind\} data-pf-progress-fold="">/, "a tool or thinking line is one fold");
+  assert.match(block, /data-pf-progress-toggle=""/, "the fold's header is a toggle");
+  assert.match(block, /aria-expanded=\{expanded\.has\(line\.id\)\}/, "the toggle carries the fold's state");
+  assert.match(block, /\{expanded\.has\(line\.id\) && \(\s*<div\s*data-pf-progress-detail=""[^>]*whiteSpace: "pre-wrap", overflowWrap: "anywhere"/, "the detail expands in place, pre-wrapped, never its own scroller");
+  assert.match(source, /const NO_EXPANDED_LINES: ReadonlySet<string> = Object\.freeze\(new Set<string>\(\)\);/, "every line starts collapsed");
+  assert.match(block, /const expanded = expandedState\.wi === wi \? expandedState\.lines : NO_EXPANDED_LINES;/, "another job starts folded without an effect");
+  assert.match(block, /setExpandedState\(\{ wi, lines: next \}\);/, "a toggle rewrites the fold's set");
   assert.doesNotMatch(block, /overflowY|maxHeight|virtuali[sz]/, "no nested vertical scroller (pi#120), no virtualisation");
   assert.doesNotMatch(block, /error|failed/i, "no error readout");
   const tones = source.slice(source.indexOf("const PROGRESS_TONE_COLORS"), source.indexOf("};", source.indexOf("const PROGRESS_TONE_COLORS")));
@@ -866,6 +917,12 @@ test("the progress section renders each stream line inline as one ellipsized lin
       assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
     }
     assert.match(localeSource, /"polyforge\.progress\.omitted": "[^"]*\{count\}[^"]*"/, `${name} must translate the omitted marker with its count`);
+    for (const key of ["polyforge.progress.orderDesc", "polyforge.progress.orderAsc", "polyforge.progress.expandDetail", "polyforge.progress.collapseDetail"]) {
+      assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
+    }
+    for (const key of ["polyforge.queue.viewList", "polyforge.queue.viewCard"]) {
+      assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
+    }
   }
 });
 
@@ -876,6 +933,6 @@ test("the detail opens at the top and the progress follows new lines only for a 
   assert.match(block, /const pinned = useRef\(false\);/, "a reader starts unpinned");
   assert.match(block, /useEffect\(\(\) => \{\s*pinned\.current = false;\s*\}, \[wi\]\);/, "another job starts unpinned");
   assert.match(block, /const onScroll = \(\) => \{ pinned\.current = isProgressPinnedToBottom\(region\); \};\s*region\.addEventListener\("scroll", onScroll, \{ passive: true \}\);\s*return \(\) => region\.removeEventListener\("scroll", onScroll\);/, "a passive listener tracks pinned");
-  assert.match(block, /useLayoutEffect\(\(\) => \{\s*const region = scrollRef\.current;\s*if \(region && pinned\.current\) region\.scrollTop = region\.scrollHeight;\s*\}, \[snapshot, scrollRef\]\);/, "a new snapshot follows only a pinned reader");
+  assert.match(block, /useLayoutEffect\(\(\) => \{\s*const region = scrollRef\.current;\s*if \(region && progressOrder === "asc" && pinned\.current\) region\.scrollTop = region\.scrollHeight;\s*\}, \[snapshot, scrollRef, progressOrder\]\);/, "a new snapshot follows only a pinned reader, oldest first (newest first prepends in place)");
   assert.doesNotMatch(source, /jump|latest/i, "no jump-to-latest control");
 });

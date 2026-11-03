@@ -496,19 +496,25 @@ try {
     } finally { await closePage(state); }
   });
 
-  // S8 — spec Req 8 / AC 8: the Jobs cards are one row of fixed 150px cards.
+  // S8 — spec Req 8 / AC 8: the Jobs cards are fixed 150px cells in a wrapping grid.
   // owner 有意变更: the shared Jobs/Tasks minimum is
-  // 150px (was 160px). owner 有意变更 the Jobs stream is one
-  // horizontally scrolling row, so the two cards share one row at every width
-  // (they were two columns at 460/375 and stacked at 340) and the row scrolls
-  // once the cards no longer fit (the 340px dock).
-  await check("S8", "Jobs cards are one row of fixed 150px cards at 460/375/340", async () => {
+  // 150px (was 160px). owner 有意变更 (pi#1): the Jobs stream's cards
+  // wrap into rows — two 76px rows visible by default — so the two cards
+  // share one row at every width that fits 316px (the 460px dock and the
+  // 375px sheet) while the 340px dock wraps the second card under the first
+  // instead of scrolling it sideways.
+  await check("S8", "Jobs cards are a wrapping grid of fixed 150px cells at 460/375/340", async () => {
+    // (pi#1's intentional change, not a regression): the Jobs stream's card
+    // presentation is now a wrapping grid of the same fixed 150px cells —
+    // two 76px rows visible by default — so a width that cannot fit two
+    // cells side by side wraps the second card under the first instead of
+    // scrolling horizontally.
     const cases = [
-      [{ width: 460, storage: { "pi-web:polyforge-dock-width": "460" } }, "460 dock", false],
-      [{ width: 375, storage: {} }, "375 sheet", false],
-      [{ width: 340, storage: { "pi-web:polyforge-dock-width": "340" } }, "340 dock", true],
+      [{ width: 460, storage: { "pi-web:polyforge-dock-width": "460" } }, "460 dock", 1],
+      [{ width: 375, storage: {} }, "375 sheet", 1],
+      [{ width: 340, storage: { "pi-web:polyforge-dock-width": "340" } }, "340 dock", 2],
     ];
-    for (const [opts, label, overflows] of cases) {
+    for (const [opts, label, expectedRows] of cases) {
       const state = await openPage({ session: MAIN, marker: "E2E ui polish reply", viewport: { width: opts.width, height: 800 }, storage: opts.storage, routes: jobsRoutes });
       try {
         await openJobsDock(state.page);
@@ -517,24 +523,34 @@ try {
           const row = card?.parentElement;
           if (!row) return null;
           const style = getComputedStyle(row);
-          const cards = [...row.querySelectorAll("[data-pf-card-wi]")].map((node) => { const r = node.getBoundingClientRect(); return { top: Math.round(r.top), left: Math.round(r.left), width: r.width }; });
+          const cards = [...row.querySelectorAll("[data-pf-card-wi]")].map((node) => { const r = node.getBoundingClientRect(); return { top: Math.round(r.top), left: Math.round(r.left), width: r.width, height: r.height }; });
           return { cards, width: row.getBoundingClientRect().width, clientWidth: row.clientWidth, scrollWidth: row.scrollWidth,
-            overflowX: style.overflowX, scrollbarWidth: style.scrollbarWidth };
+            overflowX: style.overflowX, overflowY: style.overflowY, scrollbarWidth: style.scrollbarWidth, maxHeight: style.maxHeight,
+            clientHeight: row.clientHeight, scrollHeight: row.scrollHeight };
         });
-        assert.ok(measured, `${label}: the card row did not render`);
+        assert.ok(measured, `${label}: the card grid did not render`);
         assert.equal(measured.cards.length, 2, `${label}: expected two cards`);
         const rows = new Set(measured.cards.map((card) => card.top));
-        assert.equal(rows.size, 1, `${label}: the cards share one row (${JSON.stringify(measured.cards)})`);
+        assert.equal(rows.size, expectedRows, `${label}: the cards sit on ${expectedRows} row(s) (${JSON.stringify(measured.cards)})`);
         assert.ok(measured.cards.every((card) => Math.abs(card.width - 150) <= 0.5),
           `${label}: each card is a fixed 150px wide (${JSON.stringify(measured.cards.map((card) => card.width))})`);
-        assert.ok(measured.cards[1].left - (measured.cards[0].left + measured.cards[0].width) >= 6,
-          `${label}: the two cards keep the 8px gap (${JSON.stringify(measured.cards)})`);
-        assert.equal(measured.overflowX, "auto", `${label}: the card row scrolls horizontally (${measured.overflowX})`);
-        assert.equal(measured.scrollbarWidth, "thin", `${label}: the row's scrollbar stays visible but thin (${measured.scrollbarWidth})`);
-        if (overflows) assert.ok(measured.scrollWidth > measured.clientWidth,
-          `${label}: two 150px cards exceed the ${measured.clientWidth}px row and it scrolls (${measured.scrollWidth})`);
-        else assert.ok(measured.scrollWidth <= measured.clientWidth,
-          `${label}: two 150px cards fit the ${measured.clientWidth}px row with free space at the right (${measured.scrollWidth})`);
+        assert.ok(measured.cards.every((card) => Math.abs(card.height - 76) <= 0.5),
+          `${label}: each card is the fixed 76px cell (${JSON.stringify(measured.cards.map((card) => card.height))})`);
+        if (expectedRows === 1) {
+          assert.ok(measured.cards[1].left - (measured.cards[0].left + measured.cards[0].width) >= 6,
+            `${label}: the two cards keep the 8px gap (${JSON.stringify(measured.cards)})`);
+          assert.ok(measured.scrollWidth <= measured.clientWidth,
+            `${label}: two 150px cards fit the ${measured.clientWidth}px grid with free space at the right (${measured.scrollWidth})`);
+        } else {
+          assert.ok(measured.cards[1].top - (measured.cards[0].top + measured.cards[0].height) >= 6,
+            `${label}: the wrapped card keeps the 8px row gap (${JSON.stringify(measured.cards)})`);
+        }
+        assert.equal(measured.overflowX, "hidden", `${label}: the card grid never scrolls horizontally (${measured.overflowX})`);
+        assert.equal(measured.overflowY, "auto", `${label}: the card grid scrolls vertically (${measured.overflowY})`);
+        assert.equal(measured.scrollbarWidth, "thin", `${label}: the grid's scrollbar stays visible but thin (${measured.scrollbarWidth})`);
+        assert.equal(measured.maxHeight, "176px", `${label}: the visible cap is two 76px rows plus gap and padding (${measured.maxHeight})`);
+        assert.ok(measured.scrollHeight <= measured.clientHeight + 1,
+          `${label}: two cards never overflow the two-row cap (${measured.scrollHeight}/${measured.clientHeight})`);
       } finally { await closePage(state); }
     }
   });

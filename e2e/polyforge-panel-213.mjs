@@ -216,21 +216,24 @@ async function columnCount(locator) {
   const xs = await locator.evaluateAll((nodes) => nodes.map((el) => Math.round(el.getBoundingClientRect().x)));
   return new Set(xs).size;
 }
-// (owner's intentional change, not a regression): the Jobs stream
-// is ONE row of fixed 150px cards that scrolls horizontally, so it has no
+// (owner's intentional change, not a regression): the Jobs stream's card
+// presentation is now a wrapping grid of the fixed 150px cells — two 76px
+// rows visible by default, a further row scrolling under them — so it has no
 // column count of its own any more — the Tasks blocks keep their grid. The
-// helpers below measure the card row and, on the Tasks side, the grid as before.
+// helpers below measure the card grid and, on the Tasks side, the grid as before.
 async function workLayout(page) {
   await openWork(page);
   await waitFor(async () => (await cardsOn(page).count()) === 3, "three job cards render", 30_000);
   const row = cardsOn(page).first().locator("xpath=..");
   const boxes = await cardsOn(page).evaluateAll((nodes) => nodes.map((el) => {
     const box = el.getBoundingClientRect();
-    return { x: box.x, y: box.y, width: box.width };
+    return { x: box.x, y: box.y, width: box.width, height: box.height };
   }));
   const metrics = await row.evaluate((el) => ({
     clientWidth: el.clientWidth, scrollWidth: el.scrollWidth,
-    overflowX: getComputedStyle(el).overflowX, scrollbarWidth: getComputedStyle(el).scrollbarWidth,
+    clientHeight: el.clientHeight, scrollHeight: el.scrollHeight,
+    overflowX: getComputedStyle(el).overflowX, overflowY: getComputedStyle(el).overflowY,
+    scrollbarWidth: getComputedStyle(el).scrollbarWidth, maxHeight: getComputedStyle(el).maxHeight,
   }));
   return { main: await row.boundingBox(), boxes, row: metrics };
 }
@@ -290,10 +293,12 @@ try {
     const tasksGrid = await gridInfo(task.grid);
     assert.match(tasksGrid.inline, /minmax\(150px,\s*1fr\)/, `the Tasks grid uses a 150px minimum (${tasksGrid.inline})`);
     // (owner's intentional change, not a regression): the job
-    // cards are one row of fixed 150px cards, so #213's equal-width ruling now
-    // means "job card width = the Tasks grid's 150px column minimum" instead of
-    // "both grids render the same tracks". The old two-column expectation is
-    // replaced by the one-row / horizontally scrollable shape, not relaxed.
+    // cards are fixed 150px cells in a wrapping grid, so #213's equal-width
+    // ruling now means "job card width = the Tasks grid's 150px column
+    // minimum" (unchanged), while the stream itself wraps the cells into two
+    // visible 76px rows (a further row scrolling under them) instead of the
+    // old one horizontally scrollable row. The old two-column expectation is
+    // replaced by the wrapped-grid shape, not relaxed.
     const jobWidths = jobs.boxes.map((box) => box.width);
     assert.ok(jobWidths.every((width) => Math.abs(width - 150) <= 0.5), `every job card is 150px wide (${JSON.stringify(jobWidths)})`);
     const taskMin = Number(/minmax\((\d+)px,\s*1fr\)/.exec(tasksGrid.inline)?.[1]);
@@ -301,24 +306,36 @@ try {
       `every Tasks track keeps the declared ${taskMin}px minimum (${JSON.stringify(tasksGrid.tracks)})`);
     assert.ok(Math.abs(Math.min(...jobWidths) - taskMin) <= 0.5,
       `the job card width equals the Tasks grid's declared column minimum (${Math.min(...jobWidths)}/${taskMin}px)`);
-    assert.equal(new Set(jobs.boxes.map((box) => Math.round(box.y))).size, 1,
-      `the job cards share one row (${JSON.stringify(jobs.boxes.map((box) => box.y))})`);
-    assert.equal(jobs.row.overflowX, "auto", `the card row scrolls horizontally (${jobs.row.overflowX})`);
-    assert.equal(jobs.row.scrollbarWidth, "thin", `the row's scrollbar stays visible but thin (${jobs.row.scrollbarWidth})`);
-    assert.ok(jobs.row.scrollWidth > jobs.row.clientWidth,
-      `the row overflows and can be scrolled (${jobs.row.scrollWidth}/${jobs.row.clientWidth})`);
+    const rows = new Set(jobs.boxes.map((box) => Math.round(box.y))).size;
+    assert.ok(rows >= 2, `the job cards wrap into rows (${rows} rows, ${JSON.stringify(jobs.boxes.map((box) => box.y))})`);
+    assert.ok(jobs.boxes.every((box) => Math.abs(box.height - 76) <= 0.5), `every job card is the fixed 76px cell (${JSON.stringify(jobs.boxes.map((box) => box.height))})`);
+    assert.equal(jobs.row.overflowX, "hidden", `the card grid never scrolls horizontally (${jobs.row.overflowX})`);
+    assert.equal(jobs.row.overflowY, "auto", `the card grid scrolls vertically (${jobs.row.overflowY})`);
+    assert.equal(jobs.row.scrollbarWidth, "thin", `the grid's scrollbar stays visible but thin (${jobs.row.scrollbarWidth})`);
+    assert.equal(jobs.row.maxHeight, "176px", `the visible cap is two 76px rows plus gap and padding (${jobs.row.maxHeight})`);
+    const content = rows * 76 + (rows - 1) * 8 + 16;
+    assert.ok(Math.abs(jobs.row.scrollHeight - content) <= 1, `the wrapped rows measure exactly 76px cells + 8px gaps + padding (${jobs.row.scrollHeight}/${content})`);
+    assert.ok(jobs.row.clientHeight <= 176, `the grid never shows more than the two-row cap (${jobs.row.clientHeight})`);
   }));
 
   const measureColumns = (opts, label, taskColumns) => withPage(opts, async (page) => {
     const jobs = await workLayout(page);
-    // the job cards stay one 150px-wide row at every width and
-    // the row scrolls instead of wrapping or squeezing (old: "Job cards use N
-    // column(s)").
-    assert.equal(new Set(jobs.boxes.map((box) => Math.round(box.y))).size, 1, `${label}: the job cards share one row`);
+    // the job cards stay fixed 150px cells at every width and
+    // the grid wraps them into rows (two visible, a further row scrolling)
+    // instead of squeezing them (old: "Job cards use N column(s)").
+    const rows = new Set(jobs.boxes.map((box) => Math.round(box.y))).size;
+    assert.ok(rows >= 2, `${label}: the job cards wrap into rows (${rows} rows)`);
     assert.ok(jobs.boxes.every((box) => Math.abs(box.width - 150) <= 0.5),
       `${label}: every job card is 150px wide (${JSON.stringify(jobs.boxes.map((box) => box.width))})`);
-    assert.ok(jobs.row.scrollWidth > jobs.row.clientWidth,
-      `${label}: the card row is horizontally scrollable (${jobs.row.scrollWidth}/${jobs.row.clientWidth})`);
+    assert.equal(jobs.row.overflowX, "hidden", `${label}: the card grid never scrolls horizontally (${jobs.row.overflowX})`);
+    assert.equal(jobs.row.maxHeight, "176px", `${label}: the visible cap is the two-row bound (${jobs.row.maxHeight})`);
+    if (rows > 2) {
+      assert.ok(jobs.row.scrollHeight > jobs.row.clientHeight,
+        `${label}: a ${rows}-row grid overflows the two-row cap and scrolls (${jobs.row.scrollHeight}/${jobs.row.clientHeight})`);
+    } else {
+      assert.ok(jobs.row.scrollHeight <= jobs.row.clientHeight + 1,
+        `${label}: a ${rows}-row grid needs no scroll (${jobs.row.scrollHeight}/${jobs.row.clientHeight})`);
+    }
     const task = await taskLayout(page);
     assert.equal(task.tasks, taskColumns, `${label}: Task blocks use ${taskColumns} column(s)`);
   });

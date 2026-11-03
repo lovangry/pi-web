@@ -761,10 +761,10 @@ try {
     assert.ok(ticks.length >= 2, `the cards poll keeps its cadence (${ticks.length} ticks)`);
     for (let i = 1; i < ticks.length; i++) assert.ok(ticks[i] - ticks[i - 1] >= 600, `no new faster polling loop (gaps ${ticks.slice(1).map((t, i) => t - ticks[i])})`);
   }));
-  // owner 有意变更: at the 460px dock the job cards
-  // still share one row — now a fixed 150px each in the single horizontally
-  // scrolling row, whose free space (not a stretched card) stays at the right
-  // while more cards scroll.
+  // owner 有意变更 (pi#1): at the 460px dock the job cards
+  // sit side by side in the wrapping card grid — a fixed 150px cell each,
+  // whose free space (not a stretched card) stays at the right while further
+  // cards wrap into rows under the two-row visible cap.
   await check("S19", () => withPage({ storage: { "pi-web:polyforge-dock-width": "460" } }, async (page) => {
     seed(); await openWork(page);
     const a = card(page, A.wi); const b = card(page, B.wi);
@@ -774,15 +774,19 @@ try {
     assert.ok(sameRow(boxA, boxB), `at 460px the job cards sit side by side (${boxA.y}/${boxB.y})`);
     assert.ok(gapX(boxA, boxB) >= 6, `a visible gap between the job cards (${gapX(boxA, boxB)})`);
     assert.ok(Math.abs(boxA.width - 150) <= 0.5 && Math.abs(boxB.width - 150) <= 0.5, `a job card is a fixed 150px wide (${boxA.width}/${boxB.width})`);
+    assert.ok(Math.abs(boxA.height - 76) <= 0.5 && Math.abs(boxB.height - 76) <= 0.5, `a job card is the fixed 76px cell (${boxA.height}/${boxB.height})`);
     assert.ok(boxA.width < dockBox.width * 0.6, `a job card is narrower than the main area (${boxA.width}/${dockBox.width})`);
     assert.ok(!overlap(boxA, boxB), "the job cards do not overlap");
     const row = await a.evaluate((el) => {
       const container = el.parentElement;
       return { clientWidth: container.clientWidth, scrollWidth: container.scrollWidth,
-        overflowX: getComputedStyle(container).overflowX, scrollbarWidth: getComputedStyle(container).scrollbarWidth };
+        overflowX: getComputedStyle(container).overflowX, overflowY: getComputedStyle(container).overflowY,
+        scrollbarWidth: getComputedStyle(container).scrollbarWidth, maxHeight: getComputedStyle(container).maxHeight };
     });
-    assert.equal(row.overflowX, "auto", `the job card row scrolls horizontally (${row.overflowX})`);
-    assert.equal(row.scrollbarWidth, "thin", `the row's scrollbar stays visible but thin (${row.scrollbarWidth})`);
+    assert.equal(row.overflowX, "hidden", `the job card grid never scrolls horizontally (${row.overflowX})`);
+    assert.equal(row.overflowY, "auto", `the job card grid scrolls vertically (${row.overflowY})`);
+    assert.equal(row.scrollbarWidth, "thin", `the grid's scrollbar stays visible but thin (${row.scrollbarWidth})`);
+    assert.equal(row.maxHeight, "176px", `the visible cap is two 76px rows plus gap and padding (${row.maxHeight})`);
     assert.ok(row.scrollWidth <= row.clientWidth, `at 460px two 150px job cards still fit with free space at the right (${row.scrollWidth}/${row.clientWidth})`);
     await subTab(page, RE_TASKS).click(); await taskBlock(page, T2).waitFor({ timeout: 30_000 });
     const m2 = await block(page, M2); const m3 = await block(page, M3);
@@ -794,22 +798,30 @@ try {
   // owner 有意变更: the Tasks blocks keep the shared
   // 150px track minimum (was Jobs 160px / Tasks 112px) — two across at the 375px
   // sheet (beside its 40px rail), one per row at the 340px dock.
-  // owner 有意变更 the job cards are ONE row of fixed 150px cards
-  // at both widths — the 340px dock scrolls the row instead of stacking the
-  // cards one per row like the task blocks (the 375px sheet still fits both).
+  // owner 有意变更 (pi#1): the job cards are fixed 150px cells in the
+  // wrapping card grid at both widths — the 340px dock wraps the second card
+  // under the first instead of scrolling it sideways (the 375px sheet still
+  // fits both side by side).
   await check("S20", async () => {
-    const measure = (opts, label, tasksAcross, overflows) => withPage(opts, async (page) => {
+    const measure = (opts, label, tasksAcross, wraps) => withPage(opts, async (page) => {
       seed(); await openWork(page);
       const a = await card(page, A.wi).boundingBox(); const b = await card(page, B.wi).boundingBox();
-      assert.ok(a && b && sameRow(a, b) && gapX(a, b) >= 4, `${label}: the job cards stay in one row (${a?.y}/${b?.y})`);
       assert.ok(a && b && Math.abs(a.width - 150) <= 0.5 && Math.abs(b.width - 150) <= 0.5, `${label}: each job card is a fixed 150px wide (${a?.width}/${b?.width})`);
       assert.ok(!overlap(a, b), `${label}: the job cards do not overlap`);
-      const row = await card(page, A.wi).evaluate((el) => {
+      const grid = await card(page, A.wi).evaluate((el) => {
         const container = el.parentElement;
-        return { clientWidth: container.clientWidth, scrollWidth: container.scrollWidth };
+        return { clientWidth: container.clientWidth, scrollWidth: container.scrollWidth,
+          overflowX: getComputedStyle(container).overflowX, maxHeight: getComputedStyle(container).maxHeight };
       });
-      if (overflows) assert.ok(row.scrollWidth > row.clientWidth, `${label}: the job card row scrolls instead of wrapping (${row.scrollWidth}/${row.clientWidth})`);
-      else assert.ok(row.scrollWidth <= row.clientWidth, `${label}: the two 150px job cards fit with free space at the right (${row.scrollWidth}/${row.clientWidth})`);
+      assert.equal(grid.overflowX, "hidden", `${label}: the job card grid never scrolls horizontally (${grid.overflowX})`);
+      assert.equal(grid.maxHeight, "176px", `${label}: the visible cap is the two-row bound (${grid.maxHeight})`);
+      if (wraps) {
+        assert.ok(a && b && b.y >= a.y + a.height + 4, `${label}: the narrow grid wraps the second card under the first (${a?.y}+${a?.height}/${b?.y})`);
+        assert.equal(Math.round(b.x - a.x), 0, `${label}: the wrapped card starts at the grid's left (${a?.x}/${b?.x})`);
+      } else {
+        assert.ok(a && b && sameRow(a, b) && gapX(a, b) >= 4, `${label}: the job cards stay in one row (${a?.y}/${b?.y})`);
+        assert.ok(grid.scrollWidth <= grid.clientWidth, `${label}: the two 150px job cards fit with free space at the right (${grid.scrollWidth}/${grid.clientWidth})`);
+      }
       await subTab(page, RE_TASKS).click(); await taskBlock(page, T2).waitFor({ timeout: 30_000 });
       const m2 = await block(page, M2); const m3 = await block(page, M3);
       if (tasksAcross) assert.ok(m2 && m3 && sameRow(m2, m3) && gapX(m2, m3) >= 4, `${label}: two task blocks stay side by side (${m2?.y}/${m3?.y})`);

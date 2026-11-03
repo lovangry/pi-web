@@ -55,6 +55,8 @@ const dataRoot = join(work, "data");
 const SESSION = "e2e-pf-210-session";
 const ROUTE = "/api/polyforge/progress";
 const POLL_KEY = "pi-web:polyforge-poll-interval";
+/** pi#1's newest-first render preference, held under this key (default desc). */
+const ORDER_KEY = "pi-web:polyforge-progress-order";
 const PROBE = "/api/polyforge/e2e-settle-probe";
 const EPOCH = "2026-10-31T00:00:00.000Z";
 const GOAL = "feat: pi-web 作业卡片详情区重构——自上而下三段、无嵌套滚动与实时进度";
@@ -127,8 +129,12 @@ writeFileSync(routePi, jsonl([
   { type: "session", id: "s", timestamp: EPOCH },
   { type: "message", id: "u", parentId: null, timestamp: EPOCH, message: { role: "user", content: "SECRET-PROMPT" } },
   piText("n", "E2E-ROUTE-NARRATION token=SECRET-TOKEN"),
-  pi("tc", [{ type: "thinking", thinking: "SECRET-THINKING" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "curl --token=SECRET-TOKEN https://e2e.invalid" } }]),
-  { type: "message", id: "tr", parentId: null, timestamp: EPOCH, message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "SECRET-TOOL-RESULT" }] } },
+  // (pi#1): the thinking block and the tool result now have a fold on the
+  // read face — the fixture carries credential-shaped text in each so the
+  // projection's masking is asserted on all three (narration, thinking,
+  // tool+paired result), and the result carries the call id so it pairs.
+  pi("tc", [{ type: "thinking", thinking: "route thinking token=SECRET-210-THINK" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "curl --token=SECRET-TOKEN https://e2e.invalid" } }]),
+  { type: "message", id: "tr", parentId: null, timestamp: EPOCH, message: { role: "toolResult", toolName: "bash", toolCallId: "c", content: [{ type: "text", text: "ok token=SECRET-210-RESULT" }] } },
 ]));
 const routeReview = join(caps[routeWi(1)], "session", "review.jsonl");
 writeFileSync(routeReview, jsonl([{ ...piText("r", "E2E-ROUTE-REVIEW-NARRATION"), timestamp: "2026-10-31T00:00:30.000Z" }]));
@@ -346,7 +352,10 @@ try {
     assert.doesNotMatch(all, /NaN|-\d+[smh]/, "no NaN or negative timing is rendered");
   }));
 
-  await check("S210-06", () => withPage({ clock: true }, async (page) => {
+  await check("S210-06", () => withPage({ clock: true, storage: { [ORDER_KEY]: "asc" } }, async (page) => {
+    // (pi#1's intentional change, not a regression): the render order now
+    // defaults to newest-first, so this oldest-first merge scenario pins the
+    // preference and keeps measuring the wire order as rendered.
     await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
     await waitFor(async () => /E2E-STEP-CODE-NARRATION/.test(await progressBlock(page).innerText()), "the narration entry");
     const kinds = await progressBlock(page).locator("[data-pf-progress-kind]").evaluateAll((els) => els.map((el) => el.getAttribute("data-pf-progress-kind")));
@@ -380,6 +389,14 @@ try {
     assert.ok(body.lines.some((e) => e.kind === "tool" && /bash: curl --token=\*\*\*/.test(e.text)), `one tool line is shown masked: ${text}`);
     const narration = (needle) => body.lines.findIndex((e) => e.text.includes(needle));
     assert.ok(narration("E2E-ROUTE-NARRATION") >= 0 && narration("E2E-ROUTE-REVIEW-NARRATION") > narration("E2E-ROUTE-NARRATION"), `every spawn's lines, in order: ${text}`);
+    // (pi#1): the thinking block and the tool call now have folds — their
+    // headers and their full `detail` leave the read face masked, with the
+    // tool result paired by call id.
+    const thinking = body.lines.find((e) => e.kind === "thinking");
+    assert.ok(thinking && /route thinking token=\*\*\*/.test(thinking.text), `the thinking line is masked on its header: ${text}`);
+    assert.match(thinking?.detail ?? "", /token=\*\*\*/, `the thinking fold carries the masked whole text: ${text}`);
+    const tool = body.lines.find((e) => e.kind === "tool");
+    assert.match(tool?.detail ?? "", /curl --token=\*\*\*[\s\S]*ok token=\*\*\*/, `the tool fold pairs the masked full command with its result: ${text}`);
     const events = body.lines.filter((e) => e.kind === "event");
     assert.deepEqual(events.map((e) => [e.event, e.tone]), [["step_started", "accent"], ["step_done", "dim"], ["step_started", "accent"]], `the lifecycle lines carry tone and raw kind: ${text}`);
     assert.match(events[0].text, /^\d{2}:\d{2}:\d{2} ▶ code #1 · pi:e2e\/model$/);
@@ -387,8 +404,11 @@ try {
     for (const line of body.lines) {
       if (line.kind !== "event") assert.ok(!("tone" in line) && !("event" in line), `tone/event ride event lines only: ${JSON.stringify(line)}`);
     }
-    for (const secret of ["SECRET-TOOL-RESULT", "SECRET-THINKING", "SECRET-PROMPT", "SECRET-TOKEN"]) assert.ok(!text.includes(secret), `the response leaks ${secret}`);
-    for (const kind of ["toolResult", "thinking", "user", "system"]) assert.ok(!text.includes(kind), `the response carries no ${kind} record`);
+    for (const secret of ["SECRET-210-THINK", "SECRET-210-RESULT", "SECRET-PROMPT", "SECRET-TOKEN"]) assert.ok(!text.includes(secret), `the response leaks ${secret}`);
+    // (pi#1's intentional change, not a regression): `thinking` is now a
+    // legitimate line kind on the wire; the raw transcript record shapes
+    // still never appear.
+    for (const kind of ["toolResult", "user", "system"]) assert.ok(!text.includes(kind), `the response carries no ${kind} record`);
     assert.ok(!text.includes(work), "no path leaves the read face");
   });
 
@@ -436,7 +456,13 @@ try {
       await waitFor(async () => (await progressBlock(page).locator("[data-pf-progress-kind]").count()) === 60, "all 60 lines render");
       assert.equal(await progressBlock(page).locator("[data-pf-progress-omitted]").count(), 0, "no omitted marker under the bound");
       const first = progressBlock(page).locator("[data-pf-progress-kind]").first();
-      assert.equal(await first.getAttribute("title"), "E2E-LINE-01", "each line carries its full text on hover");
+      // (pi#1's intentional change, not a regression): the render order now
+      // defaults to newest-first — the newest line renders at the top and the
+      // oldest at the bottom, while the wire snapshot itself stays oldest-first
+      // (asserted against the route above).
+      assert.equal(await first.getAttribute("title"), "E2E-LINE-60", "the newest line renders first (the default newest-first order)");
+      const last = progressBlock(page).locator("[data-pf-progress-kind]").last();
+      assert.equal(await last.getAttribute("title"), "E2E-LINE-01", "each line carries its full text on hover, the oldest last");
       const nested = await progressBlock(page).evaluate((scope) => [scope, ...scope.querySelectorAll("*")].some((el) => /(auto|scroll)/.test(getComputedStyle(el).overflowY)));
       assert.equal(nested, false, "the progress area has no inner vertical scroller");
     });

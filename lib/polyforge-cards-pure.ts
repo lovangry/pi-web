@@ -264,22 +264,36 @@ export function nextCardSnapshot(
 export const PROGRESS_MAX_LINES = 2000;
 /** A lifecycle line's cap, in code points after masking (narration's too). */
 export const PROGRESS_EVENT_MAX = 400;
+/** A collapsible line's header cap, in code points after masking — the one
+ *  line that stays visible while the detail is folded (a tool call's
+ *  `<name>: <primary argument>`, a thinking block's first sentence). */
+export const PROGRESS_HEADER_MAX = 200;
+/** A collapsible line's expanded detail cap, in code points after masking —
+ *  the full call arguments plus the paired tool result (whitespace kept:
+ *  the detail renders `pre-wrap`). */
+export const PROGRESS_DETAIL_MAX = 4000;
 
 /** An event line's colour; absent = neutral (`var(--text-muted)`). */
 export type PolyforgeProgressTone = "accent" | "dim" | "red" | "amber" | "green";
 
 /** One line of the whole-job stream: assistant narration, one masked tool
- *  call (`<name>: <primary argument>`), or one server-composed lifecycle
- *  line (`event`, with its raw daemon kind in `event` for the hover title). */
+ *  call (`<name>: <primary argument>`), one thinking block, or one
+ *  server-composed lifecycle line (`event`, with its raw daemon kind in
+ *  `event` for the hover title). Tool and thinking lines fold — their header
+ *  is the `text`, the full payload the masked `detail`. */
 export interface PolyforgeProgressLine {
   /** Unique within the snapshot; never a path. */
   id: string;
-  kind: "narration" | "tool" | "event";
+  kind: "narration" | "tool" | "thinking" | "event";
   text: string;
   /** Event lines only; absent = neutral. */
   tone?: PolyforgeProgressTone;
   /** Event lines only: the raw daemon kind. */
   event?: string;
+  /** Tool/thinking lines only: the full masked payload the fold hides.
+   *  Collapsed by default, expanded in place (the whole line's content,
+   *  never a scroller of its own). */
+  detail?: string;
 }
 
 /** `GET /api/polyforge/progress?wi=` — the whole job's stream, oldest first,
@@ -421,10 +435,16 @@ function isProgressLine(value: unknown): value is PolyforgeProgressLine {
   if (!value || typeof value !== "object") return false;
   const line = value as Record<string, unknown>;
   if (typeof line.id !== "string" || typeof line.text !== "string") return false;
-  if (line.kind === "narration" || line.kind === "tool") return line.tone === undefined && line.event === undefined;
+  // Narration never carries a fold; tool and thinking lines may carry their
+  // masked `detail`; an event line never does (it is composed server-side).
+  if (line.kind === "narration") return line.tone === undefined && line.event === undefined && line.detail === undefined;
+  if (line.kind === "tool" || line.kind === "thinking") {
+    return line.tone === undefined && line.event === undefined && (line.detail === undefined || typeof line.detail === "string");
+  }
   return line.kind === "event"
     && (line.tone === undefined || (typeof line.tone === "string" && PROGRESS_TONES.has(line.tone)))
-    && (line.event === undefined || typeof line.event === "string");
+    && (line.event === undefined || typeof line.event === "string")
+    && line.detail === undefined;
 }
 
 /** The progress snapshot to render after a read (; the
@@ -447,8 +467,8 @@ export function nextProgressSnapshot(
   if (!snapshot.lines.every(isProgressLine)) return previous;
   const all = snapshot.lines as PolyforgeProgressLine[];
   const kept = all.slice(-PROGRESS_MAX_LINES);
-  const lines = kept.map(({ id, kind, text, tone, event }) => ({
-    id, kind, text, ...(tone ? { tone } : {}), ...(event ? { event } : {}),
+  const lines = kept.map(({ id, kind, text, tone, event, detail }) => ({
+    id, kind, text, ...(tone ? { tone } : {}), ...(event ? { event } : {}), ...(detail ? { detail } : {}),
   }));
   return { available: true, lines, omitted: omitted + (all.length - kept.length) };
 }

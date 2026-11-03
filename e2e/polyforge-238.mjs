@@ -5,14 +5,18 @@
 // Authored PRE-CODE against artifacts/spec.md (Acceptance criteria + `####
 // Scenario` blocks); it does not read the implementation. The suite drives only
 // the deterministic interfaces `plan.md` pinned for this change: the existing
-// Jobs tab (`[data-pf-card-wi]`, the deselect control), the read face at
+// Jobs tab (`[data-pf-card-wi]`, `[data-pf-job-row]`, the deselect control),
+// the read face at
 // `GET /api/polyforge/progress?wi=` and the new `data-pf-*` hooks
 // (`detail-summary`, `summary-goal`, `goal-toggle`, `detail-graph`,
 // `detail-scroll`, `progress`, `progress-omitted`, `progress-kind`,
-// `progress-tone`). The existing status/cards/watch reads keep their documented
-// wire shapes and are mocked for the UI scenarios; the progress route itself is
-// exercised against a throwaway daemon data root so its whole-job enumeration,
-// event whitelist, exact `omitted` count and N6 degradation are real.
+// `progress-tone`, `progress-order`, `progress-fold`, `progress-toggle`,
+// `progress-detail`, `queue-view`). The existing status/cards/watch reads
+// keep their documented wire shapes and are mocked for the UI scenarios; the
+// progress route itself is exercised against a throwaway daemon data root so
+// its whole-job enumeration, event whitelist, exact `omitted` count, the
+// thinking/tool fold projection (masked `detail`, results paired by call id)
+// and N6 degradation are real.
 //
 // At the pre-implementation tree every kept scenario is assertion-level RED: the
 // detail has no summary/graph/scroll anchors and the old progress body carries
@@ -42,6 +46,8 @@ const project = join(work, "project");
 const dataRoot = join(work, "data");
 const SESSION = "e2e-pf-238-session";
 const ROUTE = "/api/polyforge/progress";
+/** pi#1's newest-first render preference, held under this key (default desc). */
+const ORDER_KEY = "pi-web:polyforge-progress-order";
 const UI_WAIT = 8_000;
 mkdirSync(join(agentDir, "sessions", "e2e"), { recursive: true });
 mkdirSync(project);
@@ -122,11 +128,11 @@ writeFileSync(spawn1, jsonl([
   piSession("s1", eventAt(0)),
   piText("p1", eventAt(5), "E2E-S238-SPAWN1-NARRATION"),
   piMessage("p1t", eventAt(10), [
-    { type: "thinking", thinking: "E2E-S238-SECRET-THINKING" },
+    { type: "thinking", thinking: "E2E-S238-THINKING token=SECRET-S238-THINK" },
     { type: "toolCall", id: "t1", name: "bash", arguments: { command: "curl --token=SECRET-S238-TOKEN https://e2e.invalid" } },
   ]),
   { type: "message", id: "u1", parentId: null, timestamp: eventAt(11), message: { role: "user", content: "E2E-S238-SECRET-USER" } },
-  { type: "message", id: "tr1", parentId: null, timestamp: eventAt(12), message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "E2E-S238-SECRET-TOOL-RESULT" }] } },
+  { type: "message", id: "tr1", parentId: null, timestamp: eventAt(12), message: { role: "toolResult", toolName: "bash", toolCallId: "t1", content: [{ type: "text", text: "ok token=SECRET-S238-RESULT" }] } },
 ]));
 writeFileSync(spawn2, jsonl([
   piSession("s2", eventAt(20)),
@@ -199,15 +205,16 @@ let browser; let base; let stop = async () => {};
 const dock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
 const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const card = (page, wi) => dock(page).locator(`[data-pf-card-wi="${wi}"]`);
-async function openPage({ clock = false } = {}) {
+async function openPage({ clock = false, storage = {} } = {}) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US" });
-  await context.addInitScript(() => {
+  await context.addInitScript((prefs) => {
     try {
       localStorage.setItem("pi-web:split-view-enabled", "false");
       localStorage.setItem("pi-locale", "en");
       localStorage.setItem("pi-web:polyforge-event-mode", "verbose");
+      for (const [key, value] of Object.entries(prefs)) localStorage.setItem(key, value);
     } catch { /* storage unavailable */ }
-  });
+  }, storage);
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   const progress = { status: 200, body: progressBody(), hits: [] };
@@ -446,7 +453,11 @@ try {
     assert.equal(result.virtual, false, "the progress block is not virtualised");
   }));
 
-  await check("S238-12", () => withPage({ clock: true }, async (page) => {
+  // (pi#1's intentional change, not a regression): the render order now
+  // defaults to newest-first; this scenario pins the oldest-first preference
+  // so the follow-the-tail semantics stay measured under the order they
+  // belong to. The desc order's own no-follow rule is S238-25.
+  await check("S238-12", () => withPage({ clock: true, storage: { [ORDER_KEY]: "asc" } }, async (page) => {
     page.__progress.body = progressBody(bulkLines(260));
     await openUI(page);
     await progressBlock(page).waitFor({ timeout: UI_WAIT });
@@ -510,7 +521,20 @@ try {
     assert.equal(recovery.tone, "red", "the recovery line is red");
     assert.match(push.text, /⚠ push error token=\*\*\*/, `the push line carries the masked error (${push.text})`);
     assert.equal(push.tone, "red", "the push line is red");
-    assert.ok(!JSON.stringify(body).includes("SECRET-S238-TOKEN"), "the raw credential never leaves the read face");
+    // (pi#1): the thinking block and the tool call now have folds — their
+    // headers and their full `detail` leave the read face masked, with the
+    // tool result paired by call id.
+    const thinking = (body.lines ?? []).find((entry) => entry.kind === "thinking");
+    assert.ok(thinking, "the transcript's thinking block produces its own line");
+    assert.match(thinking.text, /E2E-S238-THINKING token=\*\*\*/, `the thinking header is masked (${thinking.text})`);
+    assert.match(thinking.detail ?? "", /token=\*\*\*/, `the thinking fold carries the masked whole text (${JSON.stringify(thinking.detail)})`);
+    const tool = (body.lines ?? []).find((entry) => entry.kind === "tool");
+    assert.ok(tool, "the transcript's tool call produces its line");
+    assert.match(tool.detail ?? "", /curl --token=\*\*\*[\s\S]*ok token=\*\*\*/, `the tool fold pairs the masked full command with its result (${JSON.stringify(tool.detail)})`);
+    const wire = JSON.stringify(body);
+    assert.ok(!wire.includes("SECRET-S238-TOKEN"), "the raw credential never leaves the read face");
+    assert.ok(!wire.includes("SECRET-S238-THINK"), "the thinking credential never leaves the read face");
+    assert.ok(!wire.includes("SECRET-S238-RESULT"), "the paired result's credential never leaves the read face");
   });
 
   await check("S238-17", async () => {
@@ -604,6 +628,122 @@ try {
     const unknown = await raw("wi_S238Unknown01");
     assert.equal(unknown.status, 400, "an unknown work item in a readable index stays 400");
   });
+
+  // pi#1's 执行进度正/倒序： the render order defaults to newest-first, the
+  // control toggles it, the omitted marker stays at the oldest end and the
+  // choice persists in storage across a reload. The wire snapshot itself
+  // stays oldest-first (S238-06/S238-10), so this is purely the render face.
+  await check("S238-23", () => withPage({}, async (page) => {
+    page.__progress.body = progressBody(bulkLines(4), 3);
+    await openUI(page);
+    await progressBlock(page).waitFor({ timeout: UI_WAIT });
+    const block = progressBlock(page);
+    const order = block.locator("[data-pf-progress-order]");
+    await order.waitFor({ timeout: UI_WAIT });
+    const rendered = () => block.locator("[data-pf-progress-kind]").evaluateAll((els) => els.map((el) => (el.textContent ?? "").trim()));
+    await waitFor(async () => (await rendered()).length === 4, "the four lines render");
+    assert.equal(await order.getAttribute("aria-pressed"), "true", "the order control starts pressed (newest first by default)");
+    let lines = await rendered();
+    assert.match(lines[0], /BULK-004/, `the newest line renders first by default (${JSON.stringify(lines)})`);
+    assert.match(lines.at(-1), /BULK-001/, `the oldest line renders last by default (${JSON.stringify(lines)})`);
+    assert.ok(await block.locator("[data-pf-progress-omitted]").evaluate((el) => el.nextElementSibling === null),
+      "newest-first puts the omitted marker below the lines, at the oldest end");
+    await order.click();
+    await waitFor(async () => (await order.getAttribute("aria-pressed")) === "false", "the order control releases");
+    lines = await rendered();
+    assert.match(lines[0], /BULK-001/, `after the toggle the oldest line renders first (${JSON.stringify(lines)})`);
+    assert.match(lines.at(-1), /BULK-004/, `after the toggle the newest line renders last (${JSON.stringify(lines)})`);
+    assert.ok(await block.locator("[data-pf-progress-omitted]").evaluate((el) => Boolean(el.previousElementSibling?.querySelector("[data-pf-progress-order]"))),
+      "oldest-first puts the omitted marker above the lines");
+    assert.equal(await page.evaluate((key) => localStorage.getItem(key), ORDER_KEY), "asc", "the choice is held in storage");
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByText("E2E pf 238 host session").first().waitFor({ state: "attached", timeout: NAV_MS });
+    await openUI(page);
+    await progressBlock(page).waitFor({ timeout: UI_WAIT });
+    await waitFor(async () => (await rendered()).length === 4, "the lines render again after the reload");
+    assert.equal(await order.getAttribute("aria-pressed"), "false", "the stored order survives the reload");
+    lines = await rendered();
+    assert.match(lines[0], /BULK-001/, `the persisted oldest-first order renders oldest first (${JSON.stringify(lines)})`);
+  }));
+
+  // pi#1's 工具/思考行折叠： only the lines that carry a `detail` fold — the
+  // tool and thinking lines — and they start folded; the fold's detail shows
+  // the masked full arguments plus the paired result, adds no scroller of
+  // its own, survives a poll (ids are byte offsets) and another job starts
+  // folded (the expansion is per job).
+  await check("S238-24", () => withPage({ clock: true }, async (page) => {
+    const folds = [
+      line("f1", "narration", "E2E-S238-FOLD-NARRATION"),
+      line("f2", "tool", "bash: curl --token=*** https://e2e.invalid", { detail: "curl --token=*** https://e2e.invalid\n\nok token=***" }),
+      line("f3", "thinking", "E2E-S238-FOLD-THINKING token=***", { detail: "E2E-S238-FOLD-THINKING token=*** whole" }),
+      eventLine("f4", "00:00:01 ▶ code #1 · pi:e2e/model", "step_started", "accent"),
+    ];
+    page.__progress.body = progressBody(folds);
+    await openUI(page);
+    const block = progressBlock(page);
+    await block.waitFor({ timeout: UI_WAIT });
+    await waitFor(async () => (await block.locator("[data-pf-progress-kind]").count()) === 4, "the four lines render");
+    assert.equal(await block.locator("[data-pf-progress-detail]").count(), 0, "no detail renders before a toggle");
+    assert.equal(await block.locator("[data-pf-progress-fold]").count(), 2, "only the tool and thinking lines fold");
+    assert.equal(await block.locator('[data-pf-progress-kind="narration"][data-pf-progress-fold]').count(), 0, "a narration line never folds");
+    assert.equal(await block.locator('[data-pf-progress-kind="event"][data-pf-progress-fold]').count(), 0, "an event line never folds");
+    const toolToggle = block.locator('[data-pf-progress-kind="tool"] [data-pf-progress-toggle]');
+    const thinkingToggle = block.locator('[data-pf-progress-kind="thinking"] [data-pf-progress-toggle]');
+    assert.equal(await toolToggle.getAttribute("aria-expanded"), "false", "the tool fold starts collapsed");
+    assert.equal(await thinkingToggle.getAttribute("aria-expanded"), "false", "the thinking fold starts collapsed");
+    await toolToggle.click();
+    await waitFor(async () => (await toolToggle.getAttribute("aria-expanded")) === "true", "the tool fold expands");
+    const detail = block.locator("[data-pf-progress-detail]");
+    assert.equal(await detail.count(), 1, "exactly the expanded line's detail renders");
+    const detailText = await detail.first().innerText();
+    assert.ok(detailText.includes("curl --token=*** https://e2e.invalid"), `the detail carries the full masked arguments (${JSON.stringify(detailText)})`);
+    assert.ok(detailText.includes("ok token=***"), `the detail carries the paired masked result (${JSON.stringify(detailText)})`);
+    assert.equal(await detail.first().evaluate((el) => /(auto|scroll)/.test(getComputedStyle(el).overflowY)), false, "the fold's detail is no scroller of its own");
+    // a poll keeps the expansion (the line ids are stable across reads)
+    page.__progress.body = progressBody([...folds, line("f5", "narration", "E2E-S238-FOLD-NEW")]);
+    await tick(page, 2000); await delay(150);
+    await waitFor(async () => (await block.locator("[data-pf-progress-kind]").count()) === 5, "the polled extra line renders");
+    assert.equal(await toolToggle.getAttribute("aria-expanded"), "true", "the expanded fold survives the poll");
+    assert.equal(await block.locator("[data-pf-progress-detail]").count(), 1, "the detail stays rendered across the poll");
+    await thinkingToggle.click();
+    await waitFor(async () => (await thinkingToggle.getAttribute("aria-expanded")) === "true", "the thinking fold expands");
+    assert.equal(await block.locator("[data-pf-progress-detail]").count(), 2, "both folds can be open at once");
+    assert.equal(await block.locator('[data-pf-progress-kind="thinking"] [data-pf-progress-detail]').evaluate((el) => getComputedStyle(el).fontStyle), "italic", "the thinking detail reads as thinking");
+    await toolToggle.click();
+    await waitFor(async () => (await toolToggle.getAttribute("aria-expanded")) === "false", "the tool fold collapses again");
+    assert.equal(await block.locator("[data-pf-progress-detail]").count(), 1, "only the thinking detail remains");
+    // another job starts folded: the expansion set is per job
+    await dock(page).getByRole("button", { name: /back to job list|deselect/i }).click();
+    await card(page, DONE.wi).click();
+    await dock(page).getByRole("button", { name: /back to job list|deselect/i }).waitFor({ timeout: 10_000 });
+    const doneBlock = progressBlock(page);
+    await doneBlock.waitFor({ timeout: UI_WAIT });
+    await waitFor(async () => (await doneBlock.locator("[data-pf-progress-kind]").count()) === 5, "the other job's lines render");
+    assert.equal(await doneBlock.locator("[data-pf-progress-detail]").count(), 0, "another job's folds start collapsed");
+    assert.equal(await doneBlock.locator('[data-pf-progress-kind="tool"] [data-pf-progress-toggle]').getAttribute("aria-expanded"), "false", "the other job's tool fold is collapsed");
+  }));
+
+  // pi#1's 倒序不跟随： under the default newest-first order a new line
+  // renders at the top without any forced scroll — the reader keeps their
+  // place (the browser's own scroll anchoring aside, ≤ one line height).
+  // The oldest-first follow-the-tail rule stays in S238-12.
+  await check("S238-25", () => withPage({ clock: true }, async (page) => {
+    page.__progress.body = progressBody(bulkLines(120));
+    await openUI(page);
+    await progressBlock(page).waitFor({ timeout: UI_WAIT });
+    const scroll = scrollRegion(page);
+    await scroll.waitFor({ timeout: UI_WAIT });
+    await waitFor(async () => (await progressBlock(page).locator("[data-pf-progress-kind]").count()) > 100, "the long progress renders");
+    const atOpen = await scroll.evaluate((el) => el.scrollTop);
+    assert.equal(atOpen, 0, `opening the detail starts at the top (${atOpen})`);
+    page.__progress.body = progressBody([...bulkLines(120), line("new-1", "narration", "E2E-S238-DESC-NEW")]);
+    await tick(page, 2000); await delay(200);
+    await waitFor(async () => (await text(progressBlock(page))).includes("E2E-S238-DESC-NEW"), "the new line arrives");
+    const held = await scroll.evaluate((el) => el.scrollTop);
+    assert.ok(held <= 24, `the newest-first stream never scrolls on its own (${held})`);
+    const first = await progressBlock(page).locator("[data-pf-progress-kind]").first().innerText();
+    assert.match(first, /E2E-S238-DESC-NEW/, `the new line renders at the top, above the older ones (${JSON.stringify(first)})`);
+  }));
 } catch (error) {
   failures.push("suite");
   console.log(`FAIL suite: ${String(error?.message ?? error).split("\n")[0]}`);

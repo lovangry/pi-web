@@ -12,6 +12,8 @@ import {
   CARD_RESPONSE_MAX_BYTES,
   CARD_RESPONSE_MAX_ENTRIES,
   PROGRESS_MAX_LINES,
+  PROGRESS_HEADER_MAX,
+  PROGRESS_DETAIL_MAX,
   capCodePoints,
   composeProgressEventLine,
   formatCardCursor,
@@ -59,9 +61,12 @@ import {
  * The job detail's execution-progress face (whole-job since
  * `readProgressSnapshot`) is a separate, wider projection:
  * every spawn's transcript as narration plus one masked, truncated
- * `<name>: <primary argument>` line per tool call (`progressEntries`), merged
- * with one composed line per retained lifecycle event. It never reaches the
- * card stream above, whose whitelist stays narration only.
+ * `<name>: <primary argument>` line per tool call and one header line per
+ * thinking block (`progressEntries`) — the tool and thinking lines fold,
+ * carrying their full masked arguments/result / thinking text in
+ * `detail`, with the tool results paired by call id (`collectToolResults`) —
+ * merged with one composed line per retained lifecycle event. It never
+ * reaches the card stream above, whose whitelist stays narration only.
  */
 
 /** Small JSON records (job index, capsule, work item, execution). */
@@ -495,13 +500,81 @@ function primaryArgument(args: unknown): string | undefined {
   return undefined;
 }
 
+/** A tool call's full arguments as detail text: the primary argument
+ *  verbatim (whitespace kept — a command's shape is the point), else the
+ *  whole object as pretty JSON. */
+function toolDetailArgs(args: unknown): string | undefined {
+  const primary = primaryArgument(args);
+  if (primary !== undefined) return primary;
+  const object = asObject(args);
+  if (!object || !Object.keys(object).length) return undefined;
+  try {
+    return JSON.stringify(object, null, 2);
+  } catch {
+    return undefined;
+  }
+}
+
+/** One tool call's fold payload: its full arguments and the paired result
+ *  (either may be absent), blank-line separated, credential-masked and
+ *  capped at PROGRESS_DETAIL_MAX. */
+function toolDetail(args: unknown, result: string | undefined): string | undefined {
+  const callArgs = toolDetailArgs(args);
+  const body = callArgs !== undefined && result !== undefined ? `${callArgs}\n\n${result}` : callArgs ?? result;
+  if (body === undefined || !body.trim()) return undefined;
+  return capCodePoints(maskPolyforgeCredentials(body), PROGRESS_DETAIL_MAX);
+}
+
+/** The text of a transcript content value: a string, or the text blocks of
+ *  an array of blocks. */
+function contentText(content: unknown): string | undefined {
+  if (typeof content === "string") return content || undefined;
+  if (!Array.isArray(content)) return undefined;
+  const parts: string[] = [];
+  for (const value of content) {
+    const block = asObject(value);
+    if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
+  }
+  return parts.length ? parts.join("\n") : undefined;
+}
+
+/** The paired results of one transcript, keyed by the transcript's tool-call
+ *  id — pi `toolResult` messages (by `toolCallId`) and claude `user`
+ *  records' `tool_result` blocks (by `tool_use_id`). A later record with
+ *  the same id overwrites the earlier one (a rerun keeps its newest
+ *  answer). Assistant and every other record adds nothing. Pure. */
+export function collectToolResults(record: Record<string, unknown>, harness: PolyforgeHarness, results: Map<string, string>): void {
+  if (harness === "pi") {
+    if (record.type !== "message") return;
+    const message = asObject(record.message);
+    if (!message || message.role !== "toolResult") return;
+    const id = asString(message.toolCallId);
+    const text = contentText(message.content);
+    if (id && text !== undefined) results.set(id, text);
+    return;
+  }
+  if (record.type !== "user") return;
+  const content = asObject(record.message)?.content;
+  if (!Array.isArray(content)) return;
+  for (const value of content) {
+    const block = asObject(value);
+    if (block?.type !== "tool_result") continue;
+    const id = asString(block.tool_use_id);
+    const text = contentText(block.content);
+    if (id && text !== undefined) results.set(id, text);
+  }
+}
+
 /** The execution-progress entries of one transcript record:
  *  each assistant text block → `narration` (as `transcriptEntries`), each pi
  *  `toolCall` / claude `tool_use` block → one `tool` line `<name>: <primary
- *  argument>`, credential-masked and capped at PROGRESS_TOOL_MAX. Tool
- *  results, thinking, user/system records and every other field produce
+ *  argument>`, credential-masked and capped at PROGRESS_TOOL_MAX, and each
+ *  `thinking` block → one `thinking` line of the same shape — both carrying
+ *  the fold's masked `detail`: the full call arguments plus the result
+ *  paired by call id from `results`, or the whole thinking text. Tool
+ *  results on their own, user/system records and every other field produce
  *  nothing. Only `readProgressSnapshot` uses it; the card face never does. */
-export function progressEntries(record: Record<string, unknown>, harness: PolyforgeHarness, idPrefix: string): PolyforgeProgressLine[] {
+export function progressEntries(record: Record<string, unknown>, harness: PolyforgeHarness, idPrefix: string, results: Map<string, string>): PolyforgeProgressLine[] {
   const message = asObject(record.message);
   if (!message || message.role !== "assistant") return [];
   if (harness === "pi" ? record.type !== "message" : record.type !== "assistant") return [];
@@ -517,14 +590,25 @@ export function progressEntries(record: Record<string, unknown>, harness: Polyfo
       if (text) entries.push({ id, kind: "narration", text });
       return;
     }
+    if (block.type === "thinking" && typeof block.thinking === "string") {
+      const header = capCodePoints(maskPolyforgeCredentials(block.thinking.replace(/\s+/g, " ").trim()), PROGRESS_HEADER_MAX);
+      if (!header) return;
+      const detail = block.thinking.trim() ? capCodePoints(maskPolyforgeCredentials(block.thinking), PROGRESS_DETAIL_MAX) : undefined;
+      entries.push(detail ? { id, kind: "thinking", text: header, detail } : { id, kind: "thinking", text: header });
+      return;
+    }
     const toolBlock = harness === "pi" ? "toolCall" : "tool_use";
     if (block.type !== toolBlock) return;
     const name = asString(block.name);
     if (!name) return;
-    const argument = primaryArgument(harness === "pi" ? block.arguments : block.input);
+    const callId = asString(block.id);
+    const args = harness === "pi" ? block.arguments : block.input;
+    const argument = primaryArgument(args);
     const line = (argument ? `${name}: ${argument}` : name).replace(/\s+/g, " ").trim();
     const text = capCodePoints(maskPolyforgeCredentials(line), PROGRESS_TOOL_MAX);
-    if (text) entries.push({ id, kind: "tool", text });
+    if (!text) return;
+    const detail = toolDetail(args, callId !== undefined ? results.get(callId) : undefined);
+    entries.push(detail ? { id, kind: "tool", text, detail } : { id, kind: "tool", text });
   });
   return entries;
 }
@@ -858,22 +942,32 @@ export function readProgressSnapshot(root: string, capsuleDir: string, wi?: stri
         .digest("hex")
         .slice(0, 16);
       const buffer = slice.buffer;
-      let lineStart = 0;
-      let ordinal = 0;
-      while (lineStart < buffer.length) {
-        const newline = buffer.indexOf(0x0a, lineStart);
-        if (newline < 0) break; // a line still being written
-        ordinal += 1;
-        if (newline - lineStart <= PROGRESS_LINE_MAX_BYTES) {
-          const record = parseLine(buffer.subarray(lineStart, newline).toString("utf8"));
-          if (record) {
-            const stamp = Date.parse(asString(record.timestamp) ?? "");
-            const atMs = Number.isFinite(stamp) ? stamp : startMs + ordinal / 1000;
-            for (const entry of progressEntries(record, source.harness, `${identity}.${lineStart}`)) push(atMs, 1, entry);
+      const eachRecord = (visit: (record: Record<string, unknown>, offset: number, ordinal: number) => void) => {
+        let lineStart = 0;
+        let ordinal = 0;
+        while (lineStart < buffer.length) {
+          const newline = buffer.indexOf(0x0a, lineStart);
+          if (newline < 0) break; // a line still being written
+          ordinal += 1;
+          if (newline - lineStart <= PROGRESS_LINE_MAX_BYTES) {
+            const record = parseLine(buffer.subarray(lineStart, newline).toString("utf8"));
+            if (record) visit(record, lineStart, ordinal);
           }
+          lineStart = newline + 1;
         }
-        lineStart = newline + 1;
-      }
+      };
+      // Pass 1 — the tool results, keyed by call id: they answer calls that
+      // sit earlier in the file, so the whole transcript is walked before any
+      // line is composed (a call whose result is still unwritten gets no
+      // detail; a rerun's newest answer wins).
+      const results = new Map<string, string>();
+      eachRecord((record) => collectToolResults(record, source.harness, results));
+      // Pass 2 — the lines.
+      eachRecord((record, offset, ordinal) => {
+        const stamp = Date.parse(asString(record.timestamp) ?? "");
+        const atMs = Number.isFinite(stamp) ? stamp : startMs + ordinal / 1000;
+        for (const entry of progressEntries(record, source.harness, `${identity}.${offset}`, results)) push(atMs, 1, entry);
+      });
     }
 
     items.sort((a, b) => a.atMs - b.atMs || a.rank - b.rank || a.order - b.order);

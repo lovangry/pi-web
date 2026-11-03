@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import type { PolyforgeJob, PolyforgeOpsStatus, PolyforgeWatchStatus } from "@/lib/polyforge-status";
 import {
   cardRunningMinutes,
@@ -16,6 +16,7 @@ import {
 } from "@/lib/polyforge-cards-pure";
 import { POLYFORGE_BLOCK_STYLE } from "@/lib/panel-layout";
 import { usePolyforgePanelPreferences } from "@/hooks/usePolyforgePanelPreferences";
+import { usePolyforgeViewPreferences } from "@/hooks/usePolyforgeViewPreferences";
 import type { PolyforgeContact, PolyforgeConversation, PolyforgeMessage, PolyforgeProjectGroup } from "@/lib/polyforge-messages-pure";
 import type { PolyforgeTab, PolyforgeWorkTab } from "@/hooks/usePolyforge";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -213,36 +214,55 @@ const PROGRESS_TONE_COLORS: Record<PolyforgeProgressTone, string> = {
 };
 
 /** One stream line's style: narration in the text colour, a tool line mono
- *  and dim, an event line in its tone (neutral `var(--text-muted)`). */
+ *  and dim, a thinking line dim and italic (its prose, not commands), an
+ *  event line in its tone (neutral `var(--text-muted)`). */
 function progressLineStyle(line: PolyforgeProgressLine): CSSProperties {
   if (line.kind === "tool") return { color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)" };
+  if (line.kind === "thinking") return { color: "var(--text-dim)", fontStyle: "italic" };
   if (line.kind === "event") return { color: line.tone ? PROGRESS_TONE_COLORS[line.tone] : "var(--text-muted)", fontFamily: "var(--font-mono, monospace)" };
   return { color: "var(--text)" };
 }
 
+/** The fold's expanded line ids shared while no job is selected. */
+const NO_EXPANDED_LINES: ReadonlySet<string> = Object.freeze(new Set<string>());
+
 /**
  * The job detail's execution progress (; whole-job since
- *): a heading, the omitted-lines marker when the 2000-line
- * bound left earlier lines out, then the selected job's stream — every
- * spawn of every step, narration, one masked tool line per call and the
- * lifecycle lines — one nowrap/ellipsized line each, oldest first, the full
- * text (and an event line's raw kind) on hover, inline in the detail's one
- * scroll region (no overflowY of its own, pi#120). The localized loading
- * (only until the first read settles), empty and unavailable states; a
- * failed or degraded later read keeps the last good snapshot without an
- * error readout (usePolyforgeProgress). Mounted only while the Jobs detail
- * of a selected job renders, so deselecting or closing the dock stops its
- * reads.
+ * #238): a heading with the order control, the omitted-lines marker when
+ * the 2000-line bound left earlier lines out, then the selected job's
+ * stream — every spawn of every step, narration, one masked tool line per
+ * call, the thinking headers and the lifecycle lines — one nowrap/ellipsized
+ * line each, the full text (and an event line's raw kind) on hover, inline in
+ * the detail's one scroll region (no overflowY of its own, pi#120). The
+ * localized loading (only until the first read settles), empty and
+ * unavailable states; a failed or degraded later read keeps the last good
+ * snapshot without an error readout (usePolyforgeProgress). Mounted only
+ * while the Jobs detail of a selected job renders, so deselecting or closing
+ * the dock stops its reads.
  *
- * Follow: `scrollRef` is the detail's one scroll region. A
- * passive scroll listener keeps `pinned` — whether the reader is at its
- * bottom (isProgressPinnedToBottom); after a new snapshot renders, the
- * region scrolls to its bottom only when it was pinned, otherwise it does
- * not move. No control is added for it. Another job starts unpinned.
+ * The order is the reader's choice (pi-web PC 版优化， pi#1): newest first
+ * by default (倒序), oldest first at a click, held under
+ * `pi-web:polyforge-progress-order`. The omitted marker stays at the oldest
+ * end — above the lines oldest-first, below them newest-first. A tool or
+ * thinking line folds: its header is the one line, the masked detail (the
+ * full call arguments plus the paired result, or the whole thinking text)
+ * expands in place under it, collapsed by default; line ids are stable
+ * across polls (byte offsets), so an expansion survives a new snapshot, and
+ * selecting another job folds every line again without an effect.
+ *
+ * Follow: `scrollRef` is the detail's one scroll region. Oldest first, the
+ * follow is unchanged: a passive scroll listener keeps `pinned` — whether the
+ * reader is at its bottom (isProgressPinnedToBottom) — and after a new
+ * snapshot renders the region scrolls to its bottom only when it was
+ * pinned. Newest first the newest lines sit at the head of the block, so a
+ * new snapshot's lines arrive inside the reader's view with no scroll write
+ * and the follow never moves a reader who is elsewhere. Another job starts
+ * unpinned.
  */
 function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null; running: boolean; scrollRef: RefObject<HTMLDivElement | null> }) {
   const { t } = useI18n();
   const snapshot = usePolyforgeProgress(wi, running);
+  const { progressOrder, setProgressOrder } = usePolyforgeViewPreferences();
   const pinned = useRef(false);
   useEffect(() => {
     pinned.current = false;
@@ -256,32 +276,102 @@ function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null
   }, [scrollRef]);
   useLayoutEffect(() => {
     const region = scrollRef.current;
-    if (region && pinned.current) region.scrollTop = region.scrollHeight;
-  }, [snapshot, scrollRef]);
+    if (region && progressOrder === "asc" && pinned.current) region.scrollTop = region.scrollHeight;
+  }, [snapshot, scrollRef, progressOrder]);
+  // The fold's expanded line ids, one selected job at a time: a line id
+  // stays expanded across polls (ids are byte offsets), another job starts
+  // folded (its ids never match this set) without a reset effect.
+  const [expandedState, setExpandedState] = useState<{ wi: string | null; lines: ReadonlySet<string> }>({ wi: null, lines: NO_EXPANDED_LINES });
+  const expanded = expandedState.wi === wi ? expandedState.lines : NO_EXPANDED_LINES;
+  const toggleLine = (id: string) => {
+    const lines = expandedState.wi === wi ? expandedState.lines : NO_EXPANDED_LINES;
+    const next = new Set(lines);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    setExpandedState({ wi, lines: next });
+  };
+  // Newest first is the render order — the snapshot itself stays oldest
+  // first (the wire contract), so a poll re-renders the same reversed list.
+  const ordered = useMemo(
+    () => (snapshot && progressOrder === "desc" ? [...snapshot.lines].reverse() : (snapshot?.lines ?? [])),
+    [snapshot, progressOrder],
+  );
   const message = !wi || snapshot?.available === false ? t("polyforge.progress.unavailable")
     : !snapshot ? t("polyforge.loading")
       : snapshot.lines.length === 0 ? t("polyforge.progress.empty") : null;
   return (
     <div data-pf-progress="" style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 11, lineHeight: "16px", minWidth: 0 }}>
-      <span style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.title")}</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
+        <span style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.title")}</span>
+        {/* the order control: newest first (pressed) or oldest first, held
+            under `pi-web:polyforge-progress-order`; the arrow points where
+            the newest line sits. */}
+        <button
+          type="button"
+          data-pf-progress-order=""
+          aria-pressed={progressOrder === "desc"}
+          title={progressOrder === "desc" ? t("polyforge.progress.orderDesc") : t("polyforge.progress.orderAsc")}
+          aria-label={progressOrder === "desc" ? t("polyforge.progress.orderDesc") : t("polyforge.progress.orderAsc")}
+          onClick={() => setProgressOrder(progressOrder === "desc" ? "asc" : "desc")}
+          style={{ marginLeft: "auto", display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, background: "none", border: "none", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer" }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            {progressOrder === "desc"
+              ? <><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></>
+              : <><path d="M12 5v14" /><path d="m5 12 7 7 7-7" /></>}
+          </svg>
+        </button>
+      </div>
       {!snapshot || message !== null ? (
         <span style={{ color: "var(--text-dim)" }}>{message}</span>
       ) : (
         <>
-          {snapshot.omitted > 0 && (
+          {progressOrder === "asc" && snapshot.omitted > 0 && (
             <span data-pf-progress-omitted="" style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.omitted", { count: snapshot.omitted })}</span>
           )}
-          {snapshot.lines.map((line) => (
-            <div
-              key={line.id}
-              data-pf-progress-kind={line.kind}
-              data-pf-progress-tone={line.kind === "event" ? (line.tone ?? "neutral") : undefined}
-              title={line.event ? `${line.event}\n${line.text}` : line.text}
-              style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, ...progressLineStyle(line) }}
-            >
-              {line.text}
-            </div>
-          ))}
+          {ordered.map((line) =>
+            line.detail === undefined ? (
+              <div
+                key={line.id}
+                data-pf-progress-kind={line.kind}
+                data-pf-progress-tone={line.kind === "event" ? (line.tone ?? "neutral") : undefined}
+                title={line.event ? `${line.event}\n${line.text}` : line.text}
+                style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, ...progressLineStyle(line) }}
+              >
+                {line.text}
+              </div>
+            ) : (
+              // A tool or thinking line: the fold. The header button carries
+              // the one ellipsized line (full text on hover); the detail
+              // expands in place under it — pre-wrapped text inside the
+              // detail's one scroll region, never a scroller of its own.
+              <div key={line.id} data-pf-progress-kind={line.kind} data-pf-progress-fold="">
+                <button
+                  type="button"
+                  data-pf-progress-toggle=""
+                  aria-expanded={expanded.has(line.id)}
+                  aria-label={t(expanded.has(line.id) ? "polyforge.progress.collapseDetail" : "polyforge.progress.expandDetail")}
+                  title={line.event ? `${line.event}\n${line.text}` : line.text}
+                  onClick={() => toggleLine(line.id)}
+                  style={{ display: "flex", alignItems: "flex-start", gap: 4, width: "100%", padding: 0, background: "none", border: "none", font: "inherit", lineHeight: "16px", color: "inherit", cursor: "pointer", textAlign: "left", minWidth: 0 }}
+                >
+                  <span aria-hidden="true" style={{ flexShrink: 0, display: "inline-block", width: "0.9em", fontSize: 9, lineHeight: "16px", color: "var(--text-dim)", transform: expanded.has(line.id) ? "rotate(90deg)" : "none" }}>▸</span>
+                  <span style={{ flex: "1 1 0", minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", ...progressLineStyle(line) }}>{line.text}</span>
+                </button>
+                {expanded.has(line.id) && (
+                  <div
+                    data-pf-progress-detail=""
+                    style={{ margin: "1px 0 1px 16px", padding: "2px 0 2px 8px", borderLeft: "2px solid var(--border)", whiteSpace: "pre-wrap", overflowWrap: "anywhere", ...progressLineStyle(line) }}
+                  >
+                    {line.detail}
+                  </div>
+                )}
+              </div>
+            ),
+          )}
+          {progressOrder === "desc" && snapshot.omitted > 0 && (
+            <span data-pf-progress-omitted="" style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.omitted", { count: snapshot.omitted })}</span>
+          )}
         </>
       )}
     </div>
@@ -291,6 +381,60 @@ function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null
 /** Job card width: the 150px the Tasks blocks' column minimum shares
  *, fixed rather than stretched. */
 const JOB_CARD_WIDTH = 150;
+
+/** Job card height, border-box: the 4px card paddings, a 16px slug line and
+ *  the two 16px goal lines — one fixed height per card, so the card view's
+ *  “two rows” are exactly two. A slug long enough to wrap further is
+ *  clamped to its two lines (the full slug is on hover). */
+const JOB_CARD_HEIGHT = 76;
+
+/** The card view's default visible rows; further rows scroll under them. */
+const JOB_CARD_ROWS = 2;
+const JOB_CARD_GAP = 8;
+const JOB_CARD_STREAM_PADDING = 8;
+
+/** The card view's stream cap: two card rows, their gap and the stream's
+ *  own padding — the height the third row scrolls under. Pure. */
+export function jobCardStreamMaxHeight(): number {
+  return JOB_CARD_ROWS * JOB_CARD_HEIGHT + (JOB_CARD_ROWS - 1) * JOB_CARD_GAP + 2 * JOB_CARD_STREAM_PADDING;
+}
+
+/** The list view's status-dot colour per job status; unknown statuses read
+ *  as dim (the sanitizer allows the known set anyway). Pure. */
+export function jobStatusColor(status: string): string {
+  switch (status) {
+    case "running": return "var(--accent)";
+    case "needs_input": return "#d97706";
+    case "completed": return "#16a34a";
+    case "failed": return "#dc2626";
+    default: return "var(--text-dim)";
+  }
+}
+
+/** A local render clock for a running job's age label — it reads
+ *  `Date.now()` and fetches nothing (the Tasks blocks' pattern); a 30s tick
+ *  keeps the label within half a minute of the wall clock. Null when the
+ *  job is not running. */
+function useRunningMinutes(startedAt: string | undefined, running: boolean): number | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    const clock = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(clock);
+  }, [running]);
+  return running ? cardRunningMinutes(startedAt, now) : null;
+}
+
+/** The job's status label with its running age in whole minutes
+ *  (`运行中 23m`) — only a running job carries the age, from the card's
+ *  earliest `job_started`; a missing/unparsable `startedAt` keeps the bare
+ *  label. */
+function useJobStatusLabel(job: PolyforgeJob, startedAt: string | undefined): string {
+  const { t } = useI18n();
+  const base = JOB_STATUS_KEYS.has(job.status) ? t(`polyforge.jobStatus.${job.status}`) : job.status;
+  const runningMinutes = useRunningMinutes(startedAt, job.status === "running");
+  return runningMinutes === null ? base : `${base} ${runningMinutes}m`;
+}
 
 /**
  * One Jobs card (compact card) in the shared
@@ -339,25 +483,9 @@ const PolyforgeJobCard = memo(function PolyforgeJobCard({
   titleLength: number;
   onSelect: (wi: string | null) => void;
 }) {
-  const { t } = useI18n();
   const { job, goal } = card;
-  const jobStatusLabel = (status: string) => (JOB_STATUS_KEYS.has(status) ? t(`polyforge.jobStatus.${status}`) : status);
   const needsInput = job.status === "needs_input";
-  const running = job.status === "running";
-  // a local render clock for the running age — it reads
-  // `Date.now()` and fetches nothing (the Tasks blocks' pattern); a 30s tick
-  // keeps the label within half a minute of the wall clock.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!running) return;
-    const clock = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(clock);
-  }, [running]);
-  const runningMinutes = running ? cardRunningMinutes(card.startedAt, now) : null;
-  const baseStatusLabel = jobStatusLabel(job.status);
-  // Only a running job carries the age; a missing/unparsable `startedAt`
-  // keeps the bare label.
-  const statusLabel = runningMinutes === null ? baseStatusLabel : `${baseStatusLabel} ${runningMinutes}m`;
+  const statusLabel = useJobStatusLabel(job, card.startedAt);
 
   const toggle = () => onSelect(selected ? null : job.slug);
   return (
@@ -379,10 +507,14 @@ const PolyforgeJobCard = memo(function PolyforgeJobCard({
       }}
       style={{
         ...POLYFORGE_BLOCK_STYLE,
-        // a fixed 150px cell of the one horizontally scrolling
-        // row — a flex basis, so a narrow row scrolls instead of squeezing it.
+        // a fixed 150px cell of the wrapping card grid — a flex
+        // basis, so a narrow stream scrolls instead of squeezing it.
         flex: `0 0 ${JOB_CARD_WIDTH}px`,
         display: "flex", flexDirection: "column", gap: 4, minWidth: 0,
+        // one fixed height per card, so the card view's “two rows” are
+        // exactly two (the goal always shows its two lines; a longer slug
+        // clamps to its two, full on hover).
+        height: JOB_CARD_HEIGHT,
         // the card-only vertical padding is 4px (the shared
         // block keeps 6px, so the Tasks blocks are unchanged).
         padding: "4px 8px",
@@ -390,13 +522,14 @@ const PolyforgeJobCard = memo(function PolyforgeJobCard({
         background: selected ? "var(--bg-selected)" : POLYFORGE_BLOCK_STYLE.background,
       }}
     >
-      {/* Title: the slug (wraps, never clipped) and the status at the right
-          end of its row — the small dim label, or for a job awaiting a human
-          answer the emphasized marker; the truncated goal under them (at most
-          2 lines). The status ellipsizes before it squeezes the slug. */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 0, minWidth: 0 }}>
+      {/* Title: the slug (wraps, clamped to two lines, never clipped) and
+          the status at the right end of its row — the small dim label, or for
+          a job awaiting a human answer the emphasized marker; the truncated
+          goal under them (at most 2 lines). The status ellipsizes before it
+          squeezes the slug. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 0, minWidth: 0, overflow: "hidden" }}>
         <div style={{ display: "flex", alignItems: "flex-start", gap: 6, minWidth: 0 }}>
-          <div style={{ flex: "1 1 0", minWidth: 0, color: "var(--text)", fontWeight: 600, overflowWrap: "anywhere", lineHeight: "16px" }}>{job.slug}</div>
+          <div title={job.slug} style={{ flex: "1 1 0", minWidth: 0, color: "var(--text)", fontWeight: 600, overflowWrap: "anywhere", lineHeight: "16px", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{job.slug}</div>
           {needsInput ? (
             <div data-pf-needs-input="" style={{ flex: "0 1 auto", minWidth: 0, maxWidth: "60%", padding: "0 5px", borderRadius: 4, border: "1px solid #d97706", color: "#d97706", fontWeight: 600, fontSize: 11, lineHeight: "14px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
               {statusLabel}
@@ -409,6 +542,67 @@ const PolyforgeJobCard = memo(function PolyforgeJobCard({
           <span title={goal} style={{ color: "var(--text-muted)", overflowWrap: "anywhere", lineHeight: "16px", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{truncateCardTitle(goal, titleLength)}</span>
         )}
       </div>
+    </div>
+  );
+});
+
+/**
+ * One Jobs list row — the queue's compact alternative to the card grid
+ * (pi#1's 列表视图): the status dot, the slug (mono, ellipsized), the status
+ * label (the needs-input marker emphasized) and the truncated goal on one
+ * line, at the whole width the stream has. Keyed by wi in the stream and
+ * memoized, so a poll updates the same DOM node; clicking (or Enter/Space)
+ * toggles the same slug selection the card does. A status-only stand-in
+ * (before the first card read) has no select handler and takes no pointer
+ * events, for the same first-read-reorder reason as the card.
+ */
+const PolyforgeJobRow = memo(function PolyforgeJobRow({
+  card,
+  pending,
+  selected,
+  titleLength,
+  onSelect,
+}: {
+  card: PolyforgeCard;
+  /** A status-only stand-in before the first card read: no card identity yet. */
+  pending: boolean;
+  selected: boolean;
+  titleLength: number;
+  onSelect: (wi: string | null) => void;
+}) {
+  const { job, goal } = card;
+  const needsInput = job.status === "needs_input";
+  const statusLabel = useJobStatusLabel(job, card.startedAt);
+
+  const toggle = () => onSelect(selected ? null : job.slug);
+  return (
+    <div
+      data-pf-job-row={pending ? undefined : polyforgeCardKey(card)}
+      role="button"
+      tabIndex={0}
+      aria-pressed={selected}
+      aria-label={`${job.slug} · ${statusLabel}`}
+      aria-disabled={pending || undefined}
+      onClick={pending ? undefined : toggle}
+      onKeyDown={pending ? undefined : (event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          toggle();
+        }
+      }}
+      style={{
+        display: "flex", alignItems: "center", gap: 8, padding: "4px 12px", fontSize: 12, minWidth: 0,
+        cursor: pending ? "default" : "pointer", pointerEvents: pending ? "none" : undefined,
+        background: selected ? "var(--bg-selected)" : "none",
+      }}
+    >
+      <span aria-hidden="true" title={statusLabel} style={{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: jobStatusColor(job.status) }} />
+      <span title={job.slug} style={{ flex: "0 1 auto", minWidth: 0, maxWidth: 220, fontFamily: "var(--font-mono, monospace)", fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{job.slug}</span>
+      <span style={{ flex: "0 0 auto", fontSize: 11, lineHeight: "16px", color: needsInput ? "#d97706" : "var(--text-dim)", fontWeight: needsInput ? 600 : 400, whiteSpace: "nowrap" }}>{statusLabel}</span>
+      {goal && (
+        <span title={goal} style={{ flex: "1 1 0", minWidth: 0, color: "var(--text-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{truncateCardTitle(goal, titleLength)}</span>
+      )}
     </div>
   );
 });
@@ -519,6 +713,9 @@ export function PolyforgePanel({
 }) {
   const { t, locale } = useI18n();
   const { titleLength } = usePolyforgePanelPreferences();
+  // the Jobs queue's presentation (pi#1): the wrapping card grid or the
+  // compact one-line-per-job list, held under `pi-web:polyforge-queue-view`.
+  const { queueView, setQueueView } = usePolyforgeViewPreferences();
   // the Work sub-tab controls follow the viewport, not the
   // dock kind — a 340px desktop dock keeps the 72px text rail, ≤640px gets
   // the 40px icon rail, both on the right of the main area.
@@ -761,14 +958,48 @@ export function PolyforgePanel({
                 <PolyforgeTasks taskCountKey={opsStatus ? `${opsStatus.tasks?.running ?? 0}:${opsStatus.tasks?.completed ?? 0}` : null} />
               ) : opsStatus ? (
                 <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-                  {/* Queue line + job card stream: the stream
-                      takes the whole body until a job is selected, then yields
-                      the lower part to the detail. */}
-                  <div style={{ maxHeight: selectedWi ? "45%" : "100%", overflowY: "auto", overflowX: "hidden", borderBottom: "1px solid var(--border)" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", fontSize: 11, color: "var(--text-dim)", borderBottom: "1px solid var(--border)" }}>
+                  {/* Queue line + job stream: the stream takes the whole body
+                      until a job is selected, then yields the lower part to
+                      the detail. pi#1 (PC 版优化): the block itself never
+                      scrolls — its two presentations scroll their own stream
+                      (the card grid its two rows, the list its rows), so no
+                      nested scroller ever sits above the detail. */}
+                  <div style={{ maxHeight: selectedWi ? "45%" : "100%", display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden", borderBottom: "1px solid var(--border)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", fontSize: 11, color: "var(--text-dim)", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
                       <span>{t("polyforge.queue")}</span>
                       <span style={{ fontWeight: 600, color: "var(--text)" }}>
                         {opsStatus.queue.running} / {opsStatus.queue.max}
+                      </span>
+                      {/* the presentation toggle (pi#1): the compact list or
+                          the card grid, held under `pi-web:polyforge-queue-view`
+                          — two icon buttons, the active one pressed. */}
+                      <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
+                        {(["list", "card"] as const).map((view) => {
+                          const active = queueView === view;
+                          const label = view === "list" ? t("polyforge.queue.viewList") : t("polyforge.queue.viewCard");
+                          return (
+                            <button
+                              key={view}
+                              type="button"
+                              data-pf-queue-view={view}
+                              aria-pressed={active}
+                              title={label}
+                              aria-label={label}
+                              onClick={() => setQueueView(view)}
+                              style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: active ? "var(--bg-selected)" : "none", border: "none", borderRadius: 4, color: active ? "var(--text)" : "var(--text-muted)", cursor: "pointer" }}
+                            >
+                              {view === "list" ? (
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <path d="M8 6h13" /><path d="M8 12h13" /><path d="M8 18h13" /><path d="M3 6h.01" /><path d="M3 12h.01" /><path d="M3 18h.01" />
+                                </svg>
+                              ) : (
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+                                </svg>
+                              )}
+                            </button>
+                          );
+                        })}
                       </span>
                     </div>
                     {/* a known snapshot with no job is the empty
@@ -777,19 +1008,33 @@ export function PolyforgePanel({
                         already says "no jobs" (no Loading… flash). */}
                     {shownCards.length === 0 ? (
                       <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.empty")}</div>
-                    ) : (
-                      // (intentional change per the 2026-10-31 ruling, not a
-                      // regression):
-                      // one row of cards that scrolls left and right — each card is a
-                      // fixed 150px (the Tasks blocks' column minimum,), so
-                      // a wider main area leaves room at the right and a narrower one
-                      // (the 340px dock) never squeezes the card. Native touch inertia, no
-                      // scroll-snap; the thin scrollbar stays visible because a desktop
-                      // mouse has no horizontal wheel and a hidden bar would strand the
-                      // cards past the fold.
-                      <div style={{ display: "flex", flexWrap: "nowrap", gap: 8, padding: 8, overflowX: "auto", scrollbarWidth: "thin" }}>
+                    ) : queueView === "card" ? (
+                      // (pi#1's intentional change, not a regression): the cards
+                      // wrap into rows of the fixed 150px cells — two rows
+                      // visible by default, a further row scrolls under them
+                      // (the vertical successor of the one horizontal row's
+                      // ruling). The card keeps its fixed width, so a narrow
+                      // stream scrolls instead of squeezing it; the thin
+                      // scrollbar stays visible for the same reason.
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: JOB_CARD_GAP, padding: JOB_CARD_STREAM_PADDING, overflowX: "hidden", overflowY: "auto", scrollbarWidth: "thin", maxHeight: jobCardStreamMaxHeight(), flex: "0 1 auto", minHeight: 0 }}>
                         {shownCards.map((card: PolyforgeCard) => (
                           <PolyforgeJobCard
+                            key={polyforgeCardKey(card)}
+                            card={card}
+                            pending={cards === null}
+                            selected={selectedWi === card.job.slug || selectedWi === card.job.wi}
+                            titleLength={titleLength}
+                            onSelect={onSelect}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      // pi#1's 列表视图： one compact row per job at the whole
+                      // stream width, the stream's own scroller under the
+                      // header (the whole body until a selection).
+                      <div style={{ flex: "1 1 0", minHeight: 0, overflowY: "auto", scrollbarWidth: "thin", display: "flex", flexDirection: "column" }}>
+                        {shownCards.map((card: PolyforgeCard) => (
+                          <PolyforgeJobRow
                             key={polyforgeCardKey(card)}
                             card={card}
                             pending={cards === null}

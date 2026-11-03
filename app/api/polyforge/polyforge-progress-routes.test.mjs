@@ -63,14 +63,14 @@ test("the progress route is GET-only, gated in-route, dynamic, and never logs, r
   assert.deepEqual(params, ["wi"], "no path/file query is read");
 });
 
-test("end to end — the whole-job body: narration + one masked tool line + lifecycle lines; no tool result, thinking, prompt or raw credential", async (t) => {
+test("end to end — the whole-job body: narration + masked thinking and tool folds + lifecycle lines; no tool result, prompt or raw credential", async (t) => {
   const f = fixture(t);
   const dir = f.capsule("wi_route210a", undefined, jsonl([
     { type: "session", id: "s" },
     { type: "message", id: "u", message: { role: "user", content: "SECRET-PROMPT" } },
     { type: "message", id: "n", message: { role: "assistant", content: [{ type: "text", text: "ROUTE-NARRATION token=SECRET-TOKEN" }] } },
-    { type: "message", id: "tc", message: { role: "assistant", content: [{ type: "thinking", thinking: "SECRET-THINKING" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "curl --token=SECRET-TOKEN https://x.invalid" } }] } },
-    { type: "message", id: "tr", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "SECRET-TOOL-RESULT" }] } },
+    { type: "message", id: "tc", message: { role: "assistant", content: [{ type: "thinking", thinking: "thinking token=SECRET-THINKING" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "curl --token=SECRET-TOKEN https://x.invalid" } }] } },
+    { type: "message", id: "tr", message: { role: "toolResult", toolName: "bash", toolCallId: "c", content: [{ type: "text", text: "ok token=SECRET-TOOL-RESULT" }] } },
   ]));
   writeFileSync(join(f.root, "events", "wi-wi_route210a.jsonl"), jsonl([
     { at: "2026-11-01T00:00:00Z", kind: "step_started", body: { step: "code", spawn_n: 1, model: "pi:m" } },
@@ -87,12 +87,19 @@ test("end to end — the whole-job body: narration + one masked tool line + life
   assert.deepEqual(body.lines.map(({ kind, text: line, tone, event }) => [kind, line.replace(/^\d{2}:\d{2}:\d{2} /, ""), tone, event]), [
     ["event", "▶ code #1 · pi:m", "accent", "step_started"],
     ["narration", "ROUTE-NARRATION token=***", undefined, undefined],
+    ["thinking", "thinking token=***", undefined, undefined],
     ["tool", "bash: curl --token=*** https://x.invalid", undefined, undefined],
     ["event", "? code", "amber", "needs_input"],
     ["event", "⚠ push token=***", "red", "push_failed"],
   ], "untimed transcript records sit at the spawn's start; dropped kinds produce no line");
+  // (pi#1): the thinking and tool lines fold — their masked `detail` leaves
+  // the read face with the paired result inside, never a raw credential.
+  const thinking = body.lines.find((line) => line.kind === "thinking");
+  assert.match(thinking?.detail ?? "", /^thinking token=\*\*\*$/, `the thinking fold carries the masked whole text: ${JSON.stringify(thinking)}`);
+  const tool = body.lines.find((line) => line.kind === "tool");
+  assert.match(tool?.detail ?? "", /curl --token=\*\*\*[\s\S]*\nok token=\*\*\*/, `the tool fold pairs the masked command with its result: ${JSON.stringify(tool)}`);
   for (const secret of SECRETS) assert.ok(!text.includes(secret), `the response leaks ${secret}`);
-  for (const word of ["toolResult", "thinking", "user", "system", dir, f.root]) assert.ok(!text.includes(word), `the response carries ${word}`);
+  for (const word of ["toolResult", "user", "system", dir, f.root]) assert.ok(!text.includes(word), `the response carries ${word}`);
 });
 
 test("a wrong-shaped or unknown wi is a 400 before any transcript read; no path leaves", async (t) => {
