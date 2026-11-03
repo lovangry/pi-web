@@ -198,7 +198,12 @@ writeRuntimeState();
 const failures = [];
 async function check(id, fn) {
   try { await fn(); console.log(`PASS ${id}`); }
-  catch (error) { failures.push(id); console.log(`FAIL ${id}: ${String(error?.message ?? error).split("\n")[0]}`); }
+  catch (error) {
+    failures.push(id);
+    // the full message keeps the actionable part of a Playwright failure
+    // (what covered the element, what it resolved to) on its first lines.
+    console.log(`FAIL ${id}: ${String(error?.message ?? error).split("\n").slice(0, 8).join("\n       ")}`);
+  }
 }
 const errors = [];
 let browser; let base; let stop = async () => {};
@@ -341,7 +346,10 @@ try {
     assert.match(body, /125s|2m|2 m/, `the step age is in the summary: ${body}`);
     assert.match(body, /\bidle 2s\b/, `the idle age is in the summary: ${body}`);
     assert.match(body, /\d{2}:\d{2}:\d{2}/, `the job start clock is in the summary: ${body}`);
-    assert.match(body, /5m/, `the total elapsed time is in the summary: ${body}`);
+    // the elapsed age grows with the run's wall clock (the fixture's
+    // startedAt is a fixed offset from the run's start), so only the shape
+    // of the elapsed readout is stable to assert on.
+    assert.match(body, /elapsed \d+[ms]\b/, `the total elapsed time is in the summary: ${body}`);
   }));
 
   await check("S238-04", () => withPage({}, async (page) => {
@@ -743,6 +751,76 @@ try {
     assert.ok(held <= 24, `the newest-first stream never scrolls on its own (${held})`);
     const first = await progressBlock(page).locator("[data-pf-progress-kind]").first().innerText();
     assert.match(first, /E2E-S238-DESC-NEW/, `the new line renders at the top, above the older ones (${JSON.stringify(first)})`);
+  }));
+
+  // pi#1's round-2 步骤分组 (the default descending order is by STEP, not
+  // by line): every step_started line heads its group and its narration,
+  // tool, thinking and closing lines render under it in time order — a
+  // step's details never sit above their step. The step header is the
+  // group's fold (expanded by default, its id stable across polls), the
+  // group's content indented under it.
+  await check("S238-26", () => withPage({ clock: true }, async (page) => {
+    const steps = [
+      eventLine("s1", "00:00:01 ▶ grill #1 · pi:e2e/model", "step_started", "accent"),
+      line("s1a", "narration", "E2E-S238-STEP1-NARRATION"),
+      line("s1b", "tool", "bash: step1 --token=***", { detail: "bash: step1 --token=***\n\nok token=***" }),
+      eventLine("s1c", "00:00:10 ■ grill +9s", "step_done", "dim"),
+      eventLine("s2", "00:00:20 ▶ spec #1 · pi:e2e/model", "step_started", "accent"),
+      line("s2a", "narration", "E2E-S238-STEP2-NARRATION"),
+      eventLine("s3", "00:00:40 ▶ deliver #1 · pi:e2e/model", "step_started", "accent"),
+      line("s3a", "narration", "E2E-S238-STEP3-NARRATION"),
+    ];
+    page.__progress.body = progressBody(steps);
+    await openUI(page);
+    const block = progressBlock(page);
+    await block.waitFor({ timeout: UI_WAIT });
+    const rendered = () => block.locator("[data-pf-progress-kind]").evaluateAll((els) => els.map((el) => (el.textContent ?? "").trim()));
+    await waitFor(async () => (await rendered()).length === 8, "the eight lines render");
+    let lines = await rendered();
+    assert.match(lines[0], /deliver/, `the newest step's header renders first (${JSON.stringify(lines)})`);
+    assert.match(lines[1], /STEP3-NARRATION/, `its details stay UNDER their step header, never above it (${JSON.stringify(lines)})`);
+    assert.ok(lines.findIndex((t) => /spec/.test(t)) < lines.findIndex((t) => /grill/.test(t)), `the newer step precedes the older one (${JSON.stringify(lines)})`);
+    assert.ok(lines.findIndex((t) => /STEP1-NARRATION/.test(t)) < lines.findIndex((t) => /■ grill/.test(t)), `the oldest step's lines render in time order, its closing line last (${JSON.stringify(lines)})`);
+    const indent = await block.locator("[data-pf-step-body] [data-pf-progress-kind]").first().evaluate((line) => {
+      const body = line.closest("[data-pf-step-body]");
+      return Math.round(line.getBoundingClientRect().left - body.getBoundingClientRect().left);
+    });
+    assert.equal(indent, 16, `the step's content is indented under its header (${indent}px)`);
+    const deliverToggle = block.locator("[data-pf-step-toggle]", { hasText: /deliver/ });
+    assert.equal(await deliverToggle.getAttribute("aria-expanded"), "true", "a step starts expanded");
+    await deliverToggle.click();
+    await waitFor(async () => (await deliverToggle.getAttribute("aria-expanded")) === "false", "the step folds");
+    lines = await rendered();
+    assert.equal(lines.length, 7, `the folded step's whole content disappears, its header stays (${JSON.stringify(lines)})`);
+    assert.ok(!lines.some((t) => /STEP3-NARRATION/.test(t)), `the whole group folds away behind its header (${JSON.stringify(lines)})`);
+    assert.equal(await block.locator('[data-pf-step-fold="folded"]').count(), 1, "the folded group carries its marker");
+    // the fold survives a poll (the header's id is its byte offset)
+    page.__progress.body = progressBody([...steps, line("s3b", "narration", "E2E-S238-STEP3-NEW")]);
+    await tick(page, 2000); await delay(150);
+    await waitFor(async () => (await text(block)).includes("deliver"), "the poll settles");
+    assert.equal(await deliverToggle.getAttribute("aria-expanded"), "false", "the step fold survives the poll");
+    assert.equal(await block.locator("[data-pf-progress-kind]").count(), 7, `the polled extra line stays hidden behind the folded step`);
+    await deliverToggle.click();
+    await waitFor(async () => (await block.locator("[data-pf-progress-kind]").count()) === 9, "unfolding reveals the polled line too");
+    // the line folds inside a step keep working next to the step fold
+    const toolToggle = block.locator('[data-pf-progress-kind="tool"] [data-pf-progress-toggle]');
+    await toolToggle.click();
+    await waitFor(async () => (await toolToggle.getAttribute("aria-expanded")) === "true", "the tool fold expands");
+    const detailText = await block.locator("[data-pf-progress-detail]").first().innerText();
+    assert.ok(detailText.includes("bash: step1 --token=***") && detailText.includes("ok token=***"), `the masked detail still expands under its step (${JSON.stringify(detailText)})`);
+    // oldest first: the groups return to the wire order, still grouped
+    await block.locator("[data-pf-progress-order]").click();
+    await waitFor(async () => (await block.locator("[data-pf-progress-order]").getAttribute("aria-pressed")) === "false", "the order control releases");
+    lines = await rendered();
+    assert.match(lines[0], /grill/, `oldest first renders the first step's header first (${JSON.stringify(lines)})`);
+    assert.ok(lines.findIndex((t) => /STEP1-NARRATION/.test(t)) < lines.findIndex((t) => /spec/.test(t)), `the steps keep their wire order (${JSON.stringify(lines)})`);
+    // another job starts with its steps expanded (the fold set is per job)
+    await dock(page).getByRole("button", { name: /back to job list|deselect/i }).click();
+    await card(page, DONE.wi).click();
+    const doneBlock = progressBlock(page);
+    await doneBlock.waitFor({ timeout: UI_WAIT });
+    await waitFor(async () => (await doneBlock.locator("[data-pf-step-toggle]").count()) === 3, "the same stream on the other job renders");
+    assert.equal(await doneBlock.locator('[data-pf-step-fold="folded"]').count(), 0, "another job's steps start expanded");
   }));
 } catch (error) {
   failures.push("suite");

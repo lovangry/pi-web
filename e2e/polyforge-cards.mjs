@@ -848,6 +848,8 @@ try {
         heights: nodes.map((el) => Math.round(el.getBoundingClientRect().height)),
         dots: nodes.map((el) => Math.round(el.querySelector("span").getBoundingClientRect().width)),
         containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+        maxHeight: getComputedStyle(container).maxHeight,
         scroll: getComputedStyle(container).overflowY,
       };
     });
@@ -858,6 +860,12 @@ try {
     assert.ok(shape.dots.every((dot) => dot === 7), `each row carries its 7px status dot (${JSON.stringify(shape.dots)})`);
     assert.ok(shape.widths.every((width) => width >= shape.containerWidth - 2), `each row spans the whole stream width (${JSON.stringify(shape.widths)}/${shape.containerWidth})`);
     assert.equal(shape.scroll, "auto", `the list keeps its own vertical scroller (${shape.scroll})`);
+    // (round-2 regression, the empty list bug): with no selection the
+    // auto-height queue block must size to its rows — the stream container
+    // keeps the card grid's `0 1 auto` basis, never a zero basis (a `1 1 0`
+    // collapsed it to height 0 and the rows rendered clipped away).
+    assert.ok(shape.containerHeight >= 4 * 24, `the list's stream container is tall enough to show its rows, not collapsed (${shape.containerHeight}px)`);
+    assert.equal(shape.maxHeight, "176px", `a long list caps at the same two-card-row stream height and scrolls (${shape.maxHeight})`);
     // the needs_input row's label reads amber and bold, the running row's
     // label carries the job's age in whole minutes (the shared card hooks)
     const labels = await rows.evaluateAll((nodes) => nodes.map((el) => {

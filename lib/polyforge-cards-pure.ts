@@ -495,3 +495,59 @@ export function cardCursors(cards: PolyforgeCard[] | null): Record<string, strin
   }
   return cursors;
 }
+
+/** One render group of the execution progress (pi#1's 步骤分组): a step's
+ *  `step_started` header line plus every line after it until the next step
+ *  starts — its narration, tool and thinking lines and its closing event
+ *  lines (`step_done` and friends close the step, they do not open one) —
+ *  or the headerless lead of lines before the first step. Pure. */
+export interface PolyforgeProgressStepGroup {
+  header: PolyforgeProgressLine | null;
+  /** The group's lines after the header, oldest first. */
+  lines: PolyforgeProgressLine[];
+}
+
+/** Split a progress stream into its step groups, oldest first: every
+ *  `step_started` line opens the next group, everything after it belongs to
+ *  it, and lines before the first step form a headerless lead group (absent
+ *  when the stream opens with its first step). Pure. */
+export function groupProgressSteps(
+  lines: readonly PolyforgeProgressLine[],
+): PolyforgeProgressStepGroup[] {
+  const groups: PolyforgeProgressStepGroup[] = [];
+  let current: PolyforgeProgressStepGroup = { header: null, lines: [] };
+  for (const line of lines) {
+    if (line.kind === "event" && line.event === "step_started") {
+      if (current.header === null && current.lines.length === 0) {
+        current = { header: line, lines: [] };
+        continue;
+      }
+      groups.push(current);
+      current = { header: line, lines: [] };
+      continue;
+    }
+    current.lines.push(line);
+  }
+  if (current.header !== null || current.lines.length > 0) groups.push(current);
+  return groups;
+}
+
+/** The render order of a progress stream's step groups (pi#1's round-2
+ *  ruling, `排序按步骤`): `asc` keeps the wire order; `desc` shows the
+ *  newest STEP first — the groups reversed, each step's lines kept in time
+ *  order under its own header, so a step's details never sit above their
+ *  step. A stream without any `step_started` line has no group to hold
+ *  together, so `desc` reverses it whole (the original whole-line rule).
+ *  The snapshot itself always stays oldest first — only the render order
+ *  changes. Pure. */
+export function orderProgressGroups(
+  lines: readonly PolyforgeProgressLine[],
+  order: "asc" | "desc",
+): PolyforgeProgressStepGroup[] {
+  const groups = groupProgressSteps(lines);
+  if (order === "asc") return groups;
+  if (groups.length === 0 || groups.every((group) => group.header === null)) {
+    return [{ header: null, lines: [...lines].reverse() }];
+  }
+  return [...groups].reverse();
+}
