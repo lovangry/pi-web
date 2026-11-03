@@ -174,7 +174,7 @@ const progressRequests = (page) => page.__progressRequests;
 async function openPage({ clock = false, storage = {} } = {}) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US" });
   await context.addInitScript(({ prefs }) => {
-    try { localStorage.setItem("pi-web:split-view-enabled", "false"); localStorage.setItem("pi-locale", "en"); for (const [k, v] of Object.entries(prefs)) localStorage.setItem(k, v); } catch { /* storage unavailable */ }
+    try { localStorage.setItem("pi-web:split-view-enabled", "false"); localStorage.setItem("pi-locale", "en"); localStorage.setItem("pi-web:polyforge-progress-expanded", "true"); for (const [k, v] of Object.entries(prefs)) localStorage.setItem(k, v); } catch { /* storage unavailable */ }
   }, { prefs: storage });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);

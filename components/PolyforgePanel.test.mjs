@@ -887,7 +887,14 @@ test("the progress section renders each stream line inline as one ellipsized lin
   // reverses the snapshot's STEP GROUPS (newest step first, each step's
   // lines kept in time order under their header), oldest first at the
   // toggle — the marker stays at the oldest end in both.
-  assert.match(block, /const \{ progressOrder, setProgressOrder \} = usePolyforgeViewPreferences\(\);/, "the order is the stored preference");
+  assert.match(block, /const \{ progressOrder, setProgressOrder, progressExpanded, setProgressExpanded \} = usePolyforgeViewPreferences\(\);/, "the order and the block's fold are the stored preferences");
+  assert.match(block, /data-pf-progress-block=\{progressExpanded \? "open" : "folded"\}/, "the block carries its fold state");
+  assert.match(block, /data-pf-progress-expand=""/, "the title row is the block's fold toggle");
+  assert.match(block, /aria-expanded=\{progressExpanded\}/, "the block starts folded by default");
+  assert.match(block, /t\(progressExpanded \? "polyforge\.progress\.collapseProgress" : "polyforge\.progress\.expandProgress"\)/, "the block toggle's label follows its state");
+  assert.match(block, /onClick=\{\(\) => setProgressExpanded\(!progressExpanded\)\}/, "a click folds or unfolds the whole stream");
+  assert.match(block, /\{progressExpanded && \(\s*!snapshot \|\| message !== null \? \(/, "folded, the block renders no line stream and no state message");
+  assert.match(block, /\{progressExpanded && \(\s*<button\s*type="button"\s*data-pf-progress-order=""/, "the order control renders only while the block stands open");
   assert.match(block, /data-pf-progress-order=""/, "the order control sits on the heading");
   assert.match(block, /aria-pressed=\{progressOrder === "desc"\}/, "the control is pressed while newest first");
   assert.match(block, /setProgressOrder\(progressOrder === "desc" \? "asc" : "desc"\)/, "a click flips the order");
@@ -931,7 +938,7 @@ test("the progress section renders each stream line inline as one ellipsized lin
       assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
     }
     assert.match(localeSource, /"polyforge\.progress\.omitted": "[^"]*\{count\}[^"]*"/, `${name} must translate the omitted marker with its count`);
-    for (const key of ["polyforge.progress.orderDesc", "polyforge.progress.orderAsc", "polyforge.progress.expandDetail", "polyforge.progress.collapseDetail", "polyforge.progress.expandStep", "polyforge.progress.collapseStep"]) {
+    for (const key of ["polyforge.progress.orderDesc", "polyforge.progress.orderAsc", "polyforge.progress.expandDetail", "polyforge.progress.collapseDetail", "polyforge.progress.expandStep", "polyforge.progress.collapseStep", "polyforge.progress.expandProgress", "polyforge.progress.collapseProgress"]) {
       assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
     }
     for (const key of ["polyforge.queue.viewList", "polyforge.queue.viewCard"]) {

@@ -202,7 +202,7 @@ async function check(id, fn) {
     failures.push(id);
     // the full message keeps the actionable part of a Playwright failure
     // (what covered the element, what it resolved to) on its first lines.
-    console.log(`FAIL ${id}: ${String(error?.message ?? error).split("\n").slice(0, 8).join("\n       ")}`);
+    console.log(`FAIL ${id}: ${String(error?.message ?? error).split("\n").slice(0, 14).join("\n       ")}`);
   }
 }
 const errors = [];
@@ -217,6 +217,13 @@ async function openPage({ clock = false, storage = {} } = {}) {
       localStorage.setItem("pi-web:split-view-enabled", "false");
       localStorage.setItem("pi-locale", "en");
       localStorage.setItem("pi-web:polyforge-event-mode", "verbose");
+      // pi#1 round 3: the progress block folds by default; the scenarios
+      // that assert the line stream bootstrap it open (S238-27 tests the
+      // default). Set only while absent, so the app's own choice wins over a
+      // reload and the stored preference stays testable.
+      if (localStorage.getItem("pi-web:polyforge-progress-expanded") === null) {
+        localStorage.setItem("pi-web:polyforge-progress-expanded", "true");
+      }
       for (const [key, value] of Object.entries(prefs)) localStorage.setItem(key, value);
     } catch { /* storage unavailable */ }
   }, storage);
@@ -821,6 +828,55 @@ try {
     await doneBlock.waitFor({ timeout: UI_WAIT });
     await waitFor(async () => (await doneBlock.locator("[data-pf-step-toggle]").count()) === 3, "the same stream on the other job renders");
     assert.equal(await doneBlock.locator('[data-pf-step-fold="folded"]').count(), 0, "another job's steps start expanded");
+  }));
+
+  // pi#1 round 3 (默认收起): the execution-progress block itself folds —
+  // the detail opens on the summary and the step graph, the line stream
+  // renders only on demand. The choice is the persisted
+  // `pi-web:polyforge-progress-expanded` view preference; a corrupt stored
+  // value reads as the default folded, the order control renders only while
+  // open, and the toggle's choice survives a reload.
+  await check("S238-27", () => withPage({ clock: true, storage: { "pi-web:polyforge-progress-expanded": "bogus" } }, async (page) => {
+    page.__progress.body = progressBody(bulkLines(4));
+    await openUI(page);
+    const block = progressBlock(page);
+    await block.waitFor({ timeout: UI_WAIT });
+    const fold = block.locator("[data-pf-progress-expand]");
+    await fold.waitFor({ timeout: UI_WAIT });
+    assert.equal(await fold.getAttribute("aria-expanded"), "false", "the progress block starts folded (默认收起)");
+    assert.equal(await block.getAttribute("data-pf-progress-block"), "folded", "the block carries its fold state");
+    assert.equal(await block.locator("[data-pf-progress-kind]").count(), 0, "no line renders behind the fold");
+    assert.equal(await block.locator("[data-pf-progress-order]").count(), 0, "the order control renders only while the block stands open");
+    assert.ok((await dock(page).locator("[data-pf-detail-graph]").count()) > 0, "the step graph above it still renders");
+    await fold.click();
+    await waitFor(async () => (await fold.getAttribute("aria-expanded")) === "true", "the block unfolds");
+    assert.equal(await block.getAttribute("data-pf-progress-block"), "open", "the open block carries its state");
+    await waitFor(async () => (await block.locator("[data-pf-progress-kind]").count()) === 4, "the lines render once unfolded");
+    assert.equal(await block.locator("[data-pf-progress-order]").count(), 1, "the order control is back");
+    assert.equal(await page.evaluate(() => localStorage.getItem("pi-web:polyforge-progress-expanded")), "true", "the choice is held in storage");
+    await fold.click();
+    await waitFor(async () => (await fold.getAttribute("aria-expanded")) === "false", "the block folds again");
+    assert.equal(await block.locator("[data-pf-progress-kind]").count(), 0, "folding hides the whole stream");
+    assert.equal(await page.evaluate(() => localStorage.getItem("pi-web:polyforge-progress-expanded")), "false", "the fold is held too");
+    // … and the stored choice survives a reload: a clean page (no clock — a
+    // paused clock would freeze the reload; the bootstrap seeds only an
+    // absent key), folded by hand, stays folded.
+    await withPage({}, async (clean) => {
+      clean.__progress.body = progressBody(bulkLines(4));
+      await openUI(clean);
+      const cleanBlock = progressBlock(clean);
+      await cleanBlock.waitFor({ timeout: UI_WAIT });
+      await waitFor(async () => (await cleanBlock.locator("[data-pf-progress-kind]").count()) === 4, "the seeded-open block renders its lines");
+      await cleanBlock.locator("[data-pf-progress-expand]").click();
+      await waitFor(async () => (await cleanBlock.locator("[data-pf-progress-expand]").getAttribute("aria-expanded")) === "false", "the block folds");
+      await clean.reload({ waitUntil: "domcontentloaded" });
+      await clean.getByText("E2E pf 238 host session").first().waitFor({ state: "attached", timeout: NAV_MS });
+      await openUI(clean);
+      const reloaded = progressBlock(clean);
+      await reloaded.waitFor({ timeout: UI_WAIT });
+      assert.equal(await reloaded.locator("[data-pf-progress-expand]").getAttribute("aria-expanded"), "false", "the stored fold choice survives the reload");
+      assert.equal(await reloaded.locator("[data-pf-progress-kind]").count(), 0, "no line renders behind the fold after the reload");
+    });
   }));
 } catch (error) {
   failures.push("suite");

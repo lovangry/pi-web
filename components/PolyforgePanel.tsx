@@ -272,11 +272,17 @@ const NO_FOLDED_STEPS: ReadonlySet<string> = Object.freeze(new Set<string>());
  * step line stays), expanded by default, per job like the line folds. The
  * group's content is indented under its header (paddingLeft), so the step
  * hierarchy reads at a glance instead of aligning flush.
+ *
+ * pi#1 round 3 (默认收起): the block itself folds — the title row is the
+ * fold, the detail opens on the summary and the step graph and the line
+ * stream renders only on demand. The choice is the persisted
+ * `pi-web:polyforge-progress-expanded` view preference (default folded);
+ * the order control only renders while the block stands open.
  */
 function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null; running: boolean; scrollRef: RefObject<HTMLDivElement | null> }) {
   const { t } = useI18n();
   const snapshot = usePolyforgeProgress(wi, running);
-  const { progressOrder, setProgressOrder } = usePolyforgeViewPreferences();
+  const { progressOrder, setProgressOrder, progressExpanded, setProgressExpanded } = usePolyforgeViewPreferences();
   const pinned = useRef(false);
   useEffect(() => {
     pinned.current = false;
@@ -326,113 +332,128 @@ function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null
     : !snapshot ? t("polyforge.loading")
       : snapshot.lines.length === 0 ? t("polyforge.progress.empty") : null;
   return (
-    <div data-pf-progress="" style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 11, lineHeight: "16px", minWidth: 0 }}>
+    <div data-pf-progress="" data-pf-progress-block={progressExpanded ? "open" : "folded"} style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 11, lineHeight: "16px", minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
-        <span style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.title")}</span>
-        {/* the order control: newest first (pressed) or oldest first, held
-            under `pi-web:polyforge-progress-order`; the arrow points where
-            the newest line sits. */}
+        {/* 默认收起 (pi#1 round 3): the title row is the block's own fold — the
+            detail opens on the summary and the step graph, the line stream only
+            on demand, the choice held under `pi-web:polyforge-progress-expanded`. */}
         <button
           type="button"
-          data-pf-progress-order=""
-          aria-pressed={progressOrder === "desc"}
-          title={progressOrder === "desc" ? t("polyforge.progress.orderDesc") : t("polyforge.progress.orderAsc")}
-          aria-label={progressOrder === "desc" ? t("polyforge.progress.orderDesc") : t("polyforge.progress.orderAsc")}
-          onClick={() => setProgressOrder(progressOrder === "desc" ? "asc" : "desc")}
-          style={{ marginLeft: "auto", display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, background: "none", border: "none", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer" }}
+          data-pf-progress-expand=""
+          aria-expanded={progressExpanded}
+          aria-label={t(progressExpanded ? "polyforge.progress.collapseProgress" : "polyforge.progress.expandProgress")}
+          title={t(progressExpanded ? "polyforge.progress.collapseProgress" : "polyforge.progress.expandProgress")}
+          onClick={() => setProgressExpanded(!progressExpanded)}
+          style={{ display: "flex", alignItems: "center", gap: 4, padding: 0, background: "none", border: "none", font: "inherit", lineHeight: "16px", color: "inherit", cursor: "pointer", textAlign: "left", minWidth: 0 }}
         >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            {progressOrder === "desc"
-              ? <><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></>
-              : <><path d="M12 5v14" /><path d="m5 12 7 7 7-7" /></>}
-          </svg>
+          <span aria-hidden="true" style={{ flexShrink: 0, display: "inline-block", width: "0.9em", fontSize: 9, lineHeight: "16px", color: "var(--text-dim)", transform: progressExpanded ? "rotate(90deg)" : "none" }}>▸</span>
+          <span style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.title")}</span>
         </button>
+        {progressExpanded && (
+          <button
+            type="button"
+            data-pf-progress-order=""
+            aria-pressed={progressOrder === "desc"}
+            title={progressOrder === "desc" ? t("polyforge.progress.orderDesc") : t("polyforge.progress.orderAsc")}
+            aria-label={progressOrder === "desc" ? t("polyforge.progress.orderDesc") : t("polyforge.progress.orderAsc")}
+            onClick={() => setProgressOrder(progressOrder === "desc" ? "asc" : "desc")}
+            style={{ marginLeft: "auto", display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, background: "none", border: "none", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer" }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              {progressOrder === "desc"
+                ? <><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></>
+                : <><path d="M12 5v14" /><path d="m5 12 7 7 7-7" /></>}
+            </svg>
+          </button>
+        )}
       </div>
-      {!snapshot || message !== null ? (
-        <span style={{ color: "var(--text-dim)" }}>{message}</span>
-      ) : (
-        <>
-          {progressOrder === "asc" && snapshot.omitted > 0 && (
-            <span data-pf-progress-omitted="" style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.omitted", { count: snapshot.omitted })}</span>
-          )}
-          {orderedGroups.map((group, groupIndex) => {
-            const stepFolded = group.header !== null && foldedSteps.has(group.header.id);
-            return (
-              <div key={group.header?.id ?? `lead-${groupIndex}`} data-pf-step-fold={group.header === null ? undefined : stepFolded ? "folded" : "open"} style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                {group.header !== null && (
-                  // The step header (its `step_started` line): the group's own
-                  // fold — clicking collapses the whole step's content below
-                  // (the line folds inside stay in their state), expanded by
-                  // default, per job like them.
-                  <button
-                    type="button"
-                    data-pf-step-toggle=""
-                    data-pf-progress-kind={group.header.kind}
-                    data-pf-progress-tone={group.header.tone ?? "neutral"}
-                    aria-expanded={!stepFolded}
-                    aria-label={t(stepFolded ? "polyforge.progress.expandStep" : "polyforge.progress.collapseStep")}
-                    title={group.header.event ? `${group.header.event}\n${group.header.text}` : group.header.text}
-                    onClick={() => toggleStep(group.header!.id)}
-                    style={{ display: "flex", alignItems: "flex-start", gap: 4, width: "100%", padding: 0, background: "none", border: "none", font: "inherit", lineHeight: "16px", color: "inherit", cursor: "pointer", textAlign: "left", minWidth: 0 }}
-                  >
-                    <span aria-hidden="true" style={{ flexShrink: 0, display: "inline-block", width: "0.9em", fontSize: 9, lineHeight: "16px", color: "var(--text-dim)", transform: stepFolded ? "none" : "rotate(90deg)" }}>▸</span>
-                    <span style={{ flex: "1 1 0", minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", ...progressLineStyle(group.header) }}>{group.header.text}</span>
-                  </button>
-                )}
-                {!stepFolded && group.lines.length > 0 && (
-                  // The step's content, indented under its header so the step
-                  // hierarchy reads at a glance (the header-less lead group
-                  // renders unindented — it has no header to sit under).
-                  <div data-pf-step-body="" style={{ paddingLeft: 16, display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                    {group.lines.map((line) =>
-                      line.detail === undefined ? (
-                        <div
-                          key={line.id}
-                          data-pf-progress-kind={line.kind}
-                          data-pf-progress-tone={line.kind === "event" ? (line.tone ?? "neutral") : undefined}
-                          title={line.event ? `${line.event}\n${line.text}` : line.text}
-                          style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, ...progressLineStyle(line) }}
-                        >
-                          {line.text}
-                        </div>
-                      ) : (
-                        // A tool or thinking line: the fold. The header button carries
-                        // the one ellipsized line (full text on hover); the detail
-                        // expands in place under it — pre-wrapped text inside the
-                        // detail's one scroll region, never a scroller of its own.
-                        <div key={line.id} data-pf-progress-kind={line.kind} data-pf-progress-fold="">
-                          <button
-                            type="button"
-                            data-pf-progress-toggle=""
-                            aria-expanded={expanded.has(line.id)}
-                            aria-label={t(expanded.has(line.id) ? "polyforge.progress.collapseDetail" : "polyforge.progress.expandDetail")}
+      {progressExpanded && (
+        !snapshot || message !== null ? (
+          <span style={{ color: "var(--text-dim)" }}>{message}</span>
+        ) : (
+          <>
+            {progressOrder === "asc" && snapshot.omitted > 0 && (
+              <span data-pf-progress-omitted="" style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.omitted", { count: snapshot.omitted })}</span>
+            )}
+            {orderedGroups.map((group, groupIndex) => {
+              const stepFolded = group.header !== null && foldedSteps.has(group.header.id);
+              return (
+                <div key={group.header?.id ?? `lead-${groupIndex}`} data-pf-step-fold={group.header === null ? undefined : stepFolded ? "folded" : "open"} style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                  {group.header !== null && (
+                    // The step header (its `step_started` line): the group's own
+                    // fold — clicking collapses the whole step's content below
+                    // (the line folds inside stay in their state), expanded by
+                    // default, per job like them.
+                    <button
+                      type="button"
+                      data-pf-step-toggle=""
+                      data-pf-progress-kind={group.header.kind}
+                      data-pf-progress-tone={group.header.tone ?? "neutral"}
+                      aria-expanded={!stepFolded}
+                      aria-label={t(stepFolded ? "polyforge.progress.expandStep" : "polyforge.progress.collapseStep")}
+                      title={group.header.event ? `${group.header.event}\n${group.header.text}` : group.header.text}
+                      onClick={() => toggleStep(group.header!.id)}
+                      style={{ display: "flex", alignItems: "flex-start", gap: 4, width: "100%", padding: 0, background: "none", border: "none", font: "inherit", lineHeight: "16px", color: "inherit", cursor: "pointer", textAlign: "left", minWidth: 0 }}
+                    >
+                      <span aria-hidden="true" style={{ flexShrink: 0, display: "inline-block", width: "0.9em", fontSize: 9, lineHeight: "16px", color: "var(--text-dim)", transform: stepFolded ? "none" : "rotate(90deg)" }}>▸</span>
+                      <span style={{ flex: "1 1 0", minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", ...progressLineStyle(group.header) }}>{group.header.text}</span>
+                    </button>
+                  )}
+                  {!stepFolded && group.lines.length > 0 && (
+                    // The step's content, indented under its header so the step
+                    // hierarchy reads at a glance (the header-less lead group
+                    // renders unindented — it has no header to sit under).
+                    <div data-pf-step-body="" style={{ paddingLeft: 16, display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                      {group.lines.map((line) =>
+                        line.detail === undefined ? (
+                          <div
+                            key={line.id}
+                            data-pf-progress-kind={line.kind}
+                            data-pf-progress-tone={line.kind === "event" ? (line.tone ?? "neutral") : undefined}
                             title={line.event ? `${line.event}\n${line.text}` : line.text}
-                            onClick={() => toggleLine(line.id)}
-                            style={{ display: "flex", alignItems: "flex-start", gap: 4, width: "100%", padding: 0, background: "none", border: "none", font: "inherit", lineHeight: "16px", color: "inherit", cursor: "pointer", textAlign: "left", minWidth: 0 }}
+                            style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, ...progressLineStyle(line) }}
                           >
-                            <span aria-hidden="true" style={{ flexShrink: 0, display: "inline-block", width: "0.9em", fontSize: 9, lineHeight: "16px", color: "var(--text-dim)", transform: expanded.has(line.id) ? "rotate(90deg)" : "none" }}>▸</span>
-                            <span style={{ flex: "1 1 0", minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", ...progressLineStyle(line) }}>{line.text}</span>
-                          </button>
-                          {expanded.has(line.id) && (
-                            <div
-                              data-pf-progress-detail=""
-                              style={{ margin: "1px 0 1px 16px", padding: "2px 0 2px 8px", borderLeft: "2px solid var(--border)", whiteSpace: "pre-wrap", overflowWrap: "anywhere", ...progressLineStyle(line) }}
+                            {line.text}
+                          </div>
+                        ) : (
+                          // A tool or thinking line: the fold. The header button carries
+                          // the one ellipsized line (full text on hover); the detail
+                          // expands in place under it — pre-wrapped text inside the
+                          // detail's one scroll region, never a scroller of its own.
+                          <div key={line.id} data-pf-progress-kind={line.kind} data-pf-progress-fold="">
+                            <button
+                              type="button"
+                              data-pf-progress-toggle=""
+                              aria-expanded={expanded.has(line.id)}
+                              aria-label={t(expanded.has(line.id) ? "polyforge.progress.collapseDetail" : "polyforge.progress.expandDetail")}
+                              title={line.event ? `${line.event}\n${line.text}` : line.text}
+                              onClick={() => toggleLine(line.id)}
+                              style={{ display: "flex", alignItems: "flex-start", gap: 4, width: "100%", padding: 0, background: "none", border: "none", font: "inherit", lineHeight: "16px", color: "inherit", cursor: "pointer", textAlign: "left", minWidth: 0 }}
                             >
-                              {line.detail}
-                            </div>
-                          )}
-                        </div>
-                      ),
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-          {progressOrder === "desc" && snapshot.omitted > 0 && (
-            <span data-pf-progress-omitted="" style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.omitted", { count: snapshot.omitted })}</span>
-          )}
-        </>
+                              <span aria-hidden="true" style={{ flexShrink: 0, display: "inline-block", width: "0.9em", fontSize: 9, lineHeight: "16px", color: "var(--text-dim)", transform: expanded.has(line.id) ? "rotate(90deg)" : "none" }}>▸</span>
+                              <span style={{ flex: "1 1 0", minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", ...progressLineStyle(line) }}>{line.text}</span>
+                            </button>
+                            {expanded.has(line.id) && (
+                              <div
+                                data-pf-progress-detail=""
+                                style={{ margin: "1px 0 1px 16px", padding: "2px 0 2px 8px", borderLeft: "2px solid var(--border)", whiteSpace: "pre-wrap", overflowWrap: "anywhere", ...progressLineStyle(line) }}
+                              >
+                                {line.detail}
+                              </div>
+                            )}
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {progressOrder === "desc" && snapshot.omitted > 0 && (
+              <span data-pf-progress-omitted="" style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.omitted", { count: snapshot.omitted })}</span>
+            )}
+          </>
+        )
       )}
     </div>
   );
