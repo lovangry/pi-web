@@ -1922,8 +1922,6 @@ export const enLocale: LocalePlugin = {
         "polyforge.progress.collapseDetail": "Collapse detail",
     "polyforge.progress.expandStep": "Expand step",
         "polyforge.progress.collapseStep": "Collapse step",
-    "polyforge.progress.expandProgress": "Expand progress",
-    "polyforge.progress.collapseProgress": "Collapse progress",
     "polyforge.goal.expand": "Show full goal",
     "polyforge.goal.collapse": "Show less",
     "polyforge.stepStatus.done": "Done",

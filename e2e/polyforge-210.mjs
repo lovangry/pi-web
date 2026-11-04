@@ -112,6 +112,13 @@ const CODE_LINES = [
   entry(2, "bash: curl --token=*** https://e2e.invalid", "tool"),
 ];
 const defaultProgress = () => snapshot(CODE_LINES);
+// pi#1 round 4 (步骤默认收起): a step's content renders only once its header
+// is clicked open — the scenarios asserting the step-code group's stream
+// open it through the same control a reader would.
+const openStep = (page, needle) => {
+  const toggle = progressBlock(page).locator("[data-pf-step-toggle]", { hasText: new RegExp(needle) });
+  return toggle.click().then(() => waitFor(async () => (await toggle.getAttribute("aria-expanded")) === "true", `the ${needle} step opens`));
+};
 
 // ── real read-face fixture: one daemon data root, capsule transcripts ──────
 const routeWi = (n) => `wi_E2E210Route${n}`;
@@ -174,7 +181,7 @@ const progressRequests = (page) => page.__progressRequests;
 async function openPage({ clock = false, storage = {} } = {}) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, locale: "en-US" });
   await context.addInitScript(({ prefs }) => {
-    try { localStorage.setItem("pi-web:split-view-enabled", "false"); localStorage.setItem("pi-locale", "en"); localStorage.setItem("pi-web:polyforge-progress-expanded", "true"); for (const [k, v] of Object.entries(prefs)) localStorage.setItem(k, v); } catch { /* storage unavailable */ }
+    try { localStorage.setItem("pi-web:split-view-enabled", "false"); localStorage.setItem("pi-locale", "en"); for (const [k, v] of Object.entries(prefs)) localStorage.setItem(k, v); } catch { /* storage unavailable */ }
   }, { prefs: storage });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
@@ -357,6 +364,7 @@ try {
     // defaults to newest-first, so this oldest-first merge scenario pins the
     // preference and keeps measuring the wire order as rendered.
     await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
+    await openStep(page, "step-code");
     await waitFor(async () => /E2E-STEP-CODE-NARRATION/.test(await progressBlock(page).innerText()), "the narration entry");
     const kinds = await progressBlock(page).locator("[data-pf-progress-kind]").evaluateAll((els) => els.map((el) => el.getAttribute("data-pf-progress-kind")));
     assert.ok(kinds.includes("narration") && kinds.includes("tool"), `both whitelisted kinds render: ${JSON.stringify(kinds)}`);
@@ -366,6 +374,10 @@ try {
     // step's lines join the stream and the earlier step's lines stay.
     page.__progress.body = snapshot([...CODE_LINES, eventLine(8, "00:00:20 ▶ step-review #1 · pi:e2e/model", "step_started", "accent"), entry(9, "E2E-STEP-REVIEW-NARRATION")]);
     await tick(page, 2000);
+    // the later step arrives collapsed (步骤默认收起) — its header shows
+    // first, its content joins only once it is opened.
+    await waitFor(async () => (await progressBlock(page).locator("[data-pf-step-toggle]", { hasText: /step-review/ }).count()) === 1, "the later step's header joins");
+    await openStep(page, "step-review");
     await waitFor(async () => /E2E-STEP-REVIEW-NARRATION/.test(await progressBlock(page).innerText()), "the later step's lines join");
     const text = await progressBlock(page).innerText();
     assert.ok(text.indexOf("E2E-STEP-CODE-NARRATION") >= 0 && text.indexOf("E2E-STEP-CODE-NARRATION") < text.indexOf("E2E-STEP-REVIEW-NARRATION"), `the earlier step's lines stay, in order: ${text}`);
@@ -470,6 +482,7 @@ try {
 
   await check("S210-11", () => withPage({ clock: true }, async (page) => {
     await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
+    await openStep(page, "step-code");
     await waitFor(async () => /E2E-STEP-CODE-NARRATION/.test(await progressBlock(page).innerText()), "the first good tail");
     page.__progress.status = 500;
     const before = page.__progress.hits.length;
@@ -556,6 +569,7 @@ try {
     const finished = [...CODE_LINES, eventLine(9, "00:00:30 ■ terminal · done", "terminal", "green")];
     page.__progress.body = snapshot(finished);
     await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
+    await openStep(page, "step-code");
     await waitFor(async () => /terminal · done/.test(await progressBlock(page).innerText()), "the finished job's last lines render");
     page.__dropA = true;
     // Both lists answer without A at least twice (the dock's 3 s cadence), and

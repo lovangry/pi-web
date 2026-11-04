@@ -211,7 +211,7 @@ async function openPage({ storage = {}, session = true, viewport = { width: 1280
   const context = await browser.newContext({ viewport, locale: "en-US" });
   await context.addInitScript(({ loc, prefs }) => {
     try {
-      localStorage.setItem("pi-web:split-view-enabled", "false"); localStorage.setItem("pi-locale", loc); localStorage.setItem("pi-web:polyforge-progress-expanded", "true");
+      localStorage.setItem("pi-web:split-view-enabled", "false"); localStorage.setItem("pi-locale", loc);
       for (const [key, value] of Object.entries(prefs)) localStorage.setItem(key, value);
     } catch { /* storage unavailable */ }
   }, { loc: "en", prefs: storage });

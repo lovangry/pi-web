@@ -228,7 +228,7 @@ function progressLineStyle(line: PolyforgeProgressLine): CSSProperties {
 const NO_EXPANDED_LINES: ReadonlySet<string> = Object.freeze(new Set<string>());
 
 /** The step folds' empty id set: steps render expanded by default. */
-const NO_FOLDED_STEPS: ReadonlySet<string> = Object.freeze(new Set<string>());
+const NO_OPEN_STEPS: ReadonlySet<string> = Object.freeze(new Set<string>());
 
 /**
  * The job detail's execution progress (; whole-job since
@@ -269,20 +269,21 @@ const NO_FOLDED_STEPS: ReadonlySet<string> = Object.freeze(new Set<string>());
  * (newest step first) and keeps each group's lines in time order under their
  * header, so a step's details never sit above their step. The step header
  * itself is a fold: clicking it collapses the whole group's content (the
- * step line stays), expanded by default, per job like the line folds. The
+ * step line stays), COLLAPSED by default (pi#1 round 4), per job like the
+ * line folds. The
  * group's content is indented under its header (paddingLeft), so the step
  * hierarchy reads at a glance instead of aligning flush.
  *
- * pi#1 round 3 (默认收起): the block itself folds — the title row is the
- * fold, the detail opens on the summary and the step graph and the line
- * stream renders only on demand. The choice is the persisted
- * `pi-web:polyforge-progress-expanded` view preference (default folded);
- * the order control only renders while the block stands open.
+ * pi#1 round 4 (步骤默认收起): the fold the owner asked for is the steps
+ * below the title, not the block itself — the block stands open (round 3's
+ * block-level fold was reverted), while every step group renders only its
+ * header until the header is clicked; the header-less lead group (lines
+ * before the first step) has no header to fold under and stays visible.
  */
 function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null; running: boolean; scrollRef: RefObject<HTMLDivElement | null> }) {
   const { t } = useI18n();
   const snapshot = usePolyforgeProgress(wi, running);
-  const { progressOrder, setProgressOrder, progressExpanded, setProgressExpanded } = usePolyforgeViewPreferences();
+  const { progressOrder, setProgressOrder } = usePolyforgeViewPreferences();
   const pinned = useRef(false);
   useEffect(() => {
     pinned.current = false;
@@ -310,17 +311,18 @@ function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null
     else next.add(id);
     setExpandedState({ wi, lines: next });
   };
-  // The step folds: the collapsed step header ids (the inverse of the line
-  // folds — steps render expanded by default), the same per-job, poll-stable
+  // The step folds: the OPEN step header ids — steps render COLLAPSED by
+  // default (pi#1 round 4: the owner asked for the steps below the title,
+  // not the block itself, to fold), the same per-job, poll-stable
   // discipline (the header's id is its byte offset).
-  const [stepFoldState, setStepFoldState] = useState<{ wi: string | null; ids: ReadonlySet<string> }>({ wi: null, ids: NO_FOLDED_STEPS });
-  const foldedSteps = stepFoldState.wi === wi ? stepFoldState.ids : NO_FOLDED_STEPS;
+  const [openStepState, setOpenStepState] = useState<{ wi: string | null; ids: ReadonlySet<string> }>({ wi: null, ids: NO_OPEN_STEPS });
+  const openSteps = openStepState.wi === wi ? openStepState.ids : NO_OPEN_STEPS;
   const toggleStep = (id: string) => {
-    const ids = stepFoldState.wi === wi ? stepFoldState.ids : NO_FOLDED_STEPS;
+    const ids = openStepState.wi === wi ? openStepState.ids : NO_OPEN_STEPS;
     const next = new Set(ids);
     if (next.has(id)) next.delete(id);
     else next.add(id);
-    setStepFoldState({ wi, ids: next });
+    setOpenStepState({ wi, ids: next });
   };
   // Newest first is the render order — the snapshot itself stays oldest
   // first (the wire contract), so a poll re-renders the same grouped list.
@@ -332,58 +334,44 @@ function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null
     : !snapshot ? t("polyforge.loading")
       : snapshot.lines.length === 0 ? t("polyforge.progress.empty") : null;
   return (
-    <div data-pf-progress="" data-pf-progress-block={progressExpanded ? "open" : "folded"} style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 11, lineHeight: "16px", minWidth: 0 }}>
+    <div data-pf-progress="" style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 11, lineHeight: "16px", minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
-        {/* 默认收起 (pi#1 round 3): the title row is the block's own fold — the
-            detail opens on the summary and the step graph, the line stream only
-            on demand, the choice held under `pi-web:polyforge-progress-expanded`. */}
+        <span style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.title")}</span>
+        {/* the order control: newest first (pressed) or oldest first, held
+            under `pi-web:polyforge-progress-order`; the arrow points where
+            the newest line sits. */}
         <button
           type="button"
-          data-pf-progress-expand=""
-          aria-expanded={progressExpanded}
-          aria-label={t(progressExpanded ? "polyforge.progress.collapseProgress" : "polyforge.progress.expandProgress")}
-          title={t(progressExpanded ? "polyforge.progress.collapseProgress" : "polyforge.progress.expandProgress")}
-          onClick={() => setProgressExpanded(!progressExpanded)}
-          style={{ display: "flex", alignItems: "center", gap: 4, padding: 0, background: "none", border: "none", font: "inherit", lineHeight: "16px", color: "inherit", cursor: "pointer", textAlign: "left", minWidth: 0 }}
+          data-pf-progress-order=""
+          aria-pressed={progressOrder === "desc"}
+          title={progressOrder === "desc" ? t("polyforge.progress.orderDesc") : t("polyforge.progress.orderAsc")}
+          aria-label={progressOrder === "desc" ? t("polyforge.progress.orderDesc") : t("polyforge.progress.orderAsc")}
+          onClick={() => setProgressOrder(progressOrder === "desc" ? "asc" : "desc")}
+          style={{ marginLeft: "auto", display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, background: "none", border: "none", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer" }}
         >
-          <span aria-hidden="true" style={{ flexShrink: 0, display: "inline-block", width: "0.9em", fontSize: 9, lineHeight: "16px", color: "var(--text-dim)", transform: progressExpanded ? "rotate(90deg)" : "none" }}>▸</span>
-          <span style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.title")}</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            {progressOrder === "desc"
+              ? <><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></>
+              : <><path d="M12 5v14" /><path d="m5 12 7 7 7-7" /></>}
+          </svg>
         </button>
-        {progressExpanded && (
-          <button
-            type="button"
-            data-pf-progress-order=""
-            aria-pressed={progressOrder === "desc"}
-            title={progressOrder === "desc" ? t("polyforge.progress.orderDesc") : t("polyforge.progress.orderAsc")}
-            aria-label={progressOrder === "desc" ? t("polyforge.progress.orderDesc") : t("polyforge.progress.orderAsc")}
-            onClick={() => setProgressOrder(progressOrder === "desc" ? "asc" : "desc")}
-            style={{ marginLeft: "auto", display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, background: "none", border: "none", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer" }}
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              {progressOrder === "desc"
-                ? <><path d="M12 19V5" /><path d="m5 12 7-7 7 7" /></>
-                : <><path d="M12 5v14" /><path d="m5 12 7 7 7-7" /></>}
-            </svg>
-          </button>
-        )}
       </div>
-      {progressExpanded && (
-        !snapshot || message !== null ? (
-          <span style={{ color: "var(--text-dim)" }}>{message}</span>
-        ) : (
-          <>
+      {!snapshot || message !== null ? (
+        <span style={{ color: "var(--text-dim)" }}>{message}</span>
+      ) : (
+        <>
             {progressOrder === "asc" && snapshot.omitted > 0 && (
               <span data-pf-progress-omitted="" style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.omitted", { count: snapshot.omitted })}</span>
             )}
             {orderedGroups.map((group, groupIndex) => {
-              const stepFolded = group.header !== null && foldedSteps.has(group.header.id);
+              const stepFolded = group.header !== null && !openSteps.has(group.header.id);
               return (
                 <div key={group.header?.id ?? `lead-${groupIndex}`} data-pf-step-fold={group.header === null ? undefined : stepFolded ? "folded" : "open"} style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
                   {group.header !== null && (
                     // The step header (its `step_started` line): the group's own
                     // fold — clicking collapses the whole step's content below
-                    // (the line folds inside stay in their state), expanded by
-                    // default, per job like them.
+                    // (the line folds inside stay in their state), collapsed
+                    // by default (pi#1 round 4), per job like them.
                     <button
                       type="button"
                       data-pf-step-toggle=""
@@ -453,7 +441,6 @@ function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null
               <span data-pf-progress-omitted="" style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.omitted", { count: snapshot.omitted })}</span>
             )}
           </>
-        )
       )}
     </div>
   );

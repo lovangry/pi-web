@@ -217,13 +217,6 @@ async function openPage({ clock = false, storage = {} } = {}) {
       localStorage.setItem("pi-web:split-view-enabled", "false");
       localStorage.setItem("pi-locale", "en");
       localStorage.setItem("pi-web:polyforge-event-mode", "verbose");
-      // pi#1 round 3: the progress block folds by default; the scenarios
-      // that assert the line stream bootstrap it open (S238-27 tests the
-      // default). Set only while absent, so the app's own choice wins over a
-      // reload and the stored preference stays testable.
-      if (localStorage.getItem("pi-web:polyforge-progress-expanded") === null) {
-        localStorage.setItem("pi-web:polyforge-progress-expanded", "true");
-      }
       for (const [key, value] of Object.entries(prefs)) localStorage.setItem(key, value);
     } catch { /* storage unavailable */ }
   }, storage);
@@ -714,7 +707,12 @@ try {
     assert.ok(detailText.includes("curl --token=*** https://e2e.invalid"), `the detail carries the full masked arguments (${JSON.stringify(detailText)})`);
     assert.ok(detailText.includes("ok token=***"), `the detail carries the paired masked result (${JSON.stringify(detailText)})`);
     assert.equal(await detail.first().evaluate((el) => /(auto|scroll)/.test(getComputedStyle(el).overflowY)), false, "the fold's detail is no scroller of its own");
-    // a poll keeps the expansion (the line ids are stable across reads)
+    // a poll keeps the expansion (the line ids are stable across reads);
+    // the polled line lands inside the code step, so the step opens first
+    // (pi#1 round 4: steps render collapsed until their header is clicked)
+    const codeToggle = block.locator("[data-pf-step-toggle]", { hasText: /code/ });
+    await codeToggle.click();
+    await waitFor(async () => (await codeToggle.getAttribute("aria-expanded")) === "true", "the code step opens");
     page.__progress.body = progressBody([...folds, line("f5", "narration", "E2E-S238-FOLD-NEW")]);
     await tick(page, 2000); await delay(150);
     await waitFor(async () => (await block.locator("[data-pf-progress-kind]").count()) === 5, "the polled extra line renders");
@@ -733,7 +731,7 @@ try {
     await dock(page).getByRole("button", { name: /back to job list|deselect/i }).waitFor({ timeout: 10_000 });
     const doneBlock = progressBlock(page);
     await doneBlock.waitFor({ timeout: UI_WAIT });
-    await waitFor(async () => (await doneBlock.locator("[data-pf-progress-kind]").count()) === 5, "the other job's lines render");
+    await waitFor(async () => (await doneBlock.locator("[data-pf-progress-kind]").count()) === 4, "the other job's lines render, its step collapsed by default");
     assert.equal(await doneBlock.locator("[data-pf-progress-detail]").count(), 0, "another job's folds start collapsed");
     assert.equal(await doneBlock.locator('[data-pf-progress-kind="tool"] [data-pf-progress-toggle]').getAttribute("aria-expanded"), "false", "the other job's tool fold is collapsed");
   }));
@@ -782,33 +780,49 @@ try {
     const block = progressBlock(page);
     await block.waitFor({ timeout: UI_WAIT });
     const rendered = () => block.locator("[data-pf-progress-kind]").evaluateAll((els) => els.map((el) => (el.textContent ?? "").trim()));
-    await waitFor(async () => (await rendered()).length === 8, "the eight lines render");
+    const deliverToggle = block.locator("[data-pf-step-toggle]", { hasText: /deliver/ });
+    // pi#1 round 4 (步骤默认收起): only the three step headers render until a
+    // header is clicked — the tool/thinking/narration stream stays hidden.
+    await waitFor(async () => (await rendered()).length === 3, "only the three step headers render");
     let lines = await rendered();
     assert.match(lines[0], /deliver/, `the newest step's header renders first (${JSON.stringify(lines)})`);
-    assert.match(lines[1], /STEP3-NARRATION/, `its details stay UNDER their step header, never above it (${JSON.stringify(lines)})`);
     assert.ok(lines.findIndex((t) => /spec/.test(t)) < lines.findIndex((t) => /grill/.test(t)), `the newer step precedes the older one (${JSON.stringify(lines)})`);
-    assert.ok(lines.findIndex((t) => /STEP1-NARRATION/.test(t)) < lines.findIndex((t) => /■ grill/.test(t)), `the oldest step's lines render in time order, its closing line last (${JSON.stringify(lines)})`);
+    assert.ok(lines.every((text) => !/NARRATION|bash:|■ grill/.test(text)), `no step's content renders until it is opened (${JSON.stringify(lines)})`);
+    assert.equal(await deliverToggle.getAttribute("aria-expanded"), "false", "a step starts collapsed (默认收起)");
+    assert.equal(await block.locator('[data-pf-step-fold="folded"]').count(), 3, "every group carries its folded marker");
+    await deliverToggle.click();
+    await waitFor(async () => (await deliverToggle.getAttribute("aria-expanded")) === "true", "the step opens");
+    lines = await rendered();
+    assert.equal(lines.length, 4, `the opened step renders its own lines only (${JSON.stringify(lines)})`);
+    assert.match(lines[1], /STEP3-NARRATION/, `its details stay UNDER their step header, never above it (${JSON.stringify(lines)})`);
+    assert.ok(!lines.some((t) => /STEP1-NARRATION|bash:/.test(t)), `the other steps stay collapsed (${JSON.stringify(lines)})`);
     const indent = await block.locator("[data-pf-step-body] [data-pf-progress-kind]").first().evaluate((line) => {
       const body = line.closest("[data-pf-step-body]");
       return Math.round(line.getBoundingClientRect().left - body.getBoundingClientRect().left);
     });
     assert.equal(indent, 16, `the step's content is indented under its header (${indent}px)`);
-    const deliverToggle = block.locator("[data-pf-step-toggle]", { hasText: /deliver/ });
-    assert.equal(await deliverToggle.getAttribute("aria-expanded"), "true", "a step starts expanded");
-    await deliverToggle.click();
-    await waitFor(async () => (await deliverToggle.getAttribute("aria-expanded")) === "false", "the step folds");
+    // opening the oldest step shows its closing line last, in time order
+    const grillToggle = block.locator("[data-pf-step-toggle]", { hasText: /grill/ });
+    await grillToggle.click();
+    await waitFor(async () => (await grillToggle.getAttribute("aria-expanded")) === "true", "the oldest step opens");
     lines = await rendered();
-    assert.equal(lines.length, 7, `the folded step's whole content disappears, its header stays (${JSON.stringify(lines)})`);
+    assert.ok(lines.findIndex((t) => /STEP1-NARRATION/.test(t)) < lines.findIndex((t) => /■ grill/.test(t)), `the oldest step's lines render in time order, its closing line last (${JSON.stringify(lines)})`);
+    assert.equal(await block.locator('[data-pf-step-fold="folded"]').count(), 1, "only the untouched step stays folded");
+    await deliverToggle.click();
+    await waitFor(async () => (await deliverToggle.getAttribute("aria-expanded")) === "false", "the step folds again");
+    lines = await rendered();
+    assert.equal(lines.length, 6, `the folded step's whole content disappears, its header stays (${JSON.stringify(lines)})`);
     assert.ok(!lines.some((t) => /STEP3-NARRATION/.test(t)), `the whole group folds away behind its header (${JSON.stringify(lines)})`);
-    assert.equal(await block.locator('[data-pf-step-fold="folded"]').count(), 1, "the folded group carries its marker");
     // the fold survives a poll (the header's id is its byte offset)
     page.__progress.body = progressBody([...steps, line("s3b", "narration", "E2E-S238-STEP3-NEW")]);
     await tick(page, 2000); await delay(150);
     await waitFor(async () => (await text(block)).includes("deliver"), "the poll settles");
     assert.equal(await deliverToggle.getAttribute("aria-expanded"), "false", "the step fold survives the poll");
-    assert.equal(await block.locator("[data-pf-progress-kind]").count(), 7, `the polled extra line stays hidden behind the folded step`);
+    assert.equal(await block.locator("[data-pf-progress-kind]").count(), 6, `the polled extra line stays hidden behind the folded step`);
     await deliverToggle.click();
-    await waitFor(async () => (await block.locator("[data-pf-progress-kind]").count()) === 9, "unfolding reveals the polled line too");
+    await waitFor(async () => (await block.locator("[data-pf-progress-kind]").count()) === 8, "unfolding reveals the polled line too");
+    await deliverToggle.click();
+    await waitFor(async () => (await deliverToggle.getAttribute("aria-expanded")) === "false", "the step folds once more for the order leg");
     // the line folds inside a step keep working next to the step fold
     const toolToggle = block.locator('[data-pf-progress-kind="tool"] [data-pf-progress-toggle]');
     await toolToggle.click();
@@ -821,63 +835,15 @@ try {
     lines = await rendered();
     assert.match(lines[0], /grill/, `oldest first renders the first step's header first (${JSON.stringify(lines)})`);
     assert.ok(lines.findIndex((t) => /STEP1-NARRATION/.test(t)) < lines.findIndex((t) => /spec/.test(t)), `the steps keep their wire order (${JSON.stringify(lines)})`);
-    // another job starts with its steps expanded (the fold set is per job)
+    // another job starts with its steps collapsed too (the open set is per job)
     await dock(page).getByRole("button", { name: /back to job list|deselect/i }).click();
     await card(page, DONE.wi).click();
     const doneBlock = progressBlock(page);
     await doneBlock.waitFor({ timeout: UI_WAIT });
     await waitFor(async () => (await doneBlock.locator("[data-pf-step-toggle]").count()) === 3, "the same stream on the other job renders");
-    assert.equal(await doneBlock.locator('[data-pf-step-fold="folded"]').count(), 0, "another job's steps start expanded");
+    assert.equal(await doneBlock.locator('[data-pf-step-fold="folded"]').count(), 3, "another job's steps start collapsed (per-job open set)");
   }));
 
-  // pi#1 round 3 (默认收起): the execution-progress block itself folds —
-  // the detail opens on the summary and the step graph, the line stream
-  // renders only on demand. The choice is the persisted
-  // `pi-web:polyforge-progress-expanded` view preference; a corrupt stored
-  // value reads as the default folded, the order control renders only while
-  // open, and the toggle's choice survives a reload.
-  await check("S238-27", () => withPage({ clock: true, storage: { "pi-web:polyforge-progress-expanded": "bogus" } }, async (page) => {
-    page.__progress.body = progressBody(bulkLines(4));
-    await openUI(page);
-    const block = progressBlock(page);
-    await block.waitFor({ timeout: UI_WAIT });
-    const fold = block.locator("[data-pf-progress-expand]");
-    await fold.waitFor({ timeout: UI_WAIT });
-    assert.equal(await fold.getAttribute("aria-expanded"), "false", "the progress block starts folded (默认收起)");
-    assert.equal(await block.getAttribute("data-pf-progress-block"), "folded", "the block carries its fold state");
-    assert.equal(await block.locator("[data-pf-progress-kind]").count(), 0, "no line renders behind the fold");
-    assert.equal(await block.locator("[data-pf-progress-order]").count(), 0, "the order control renders only while the block stands open");
-    assert.ok((await dock(page).locator("[data-pf-detail-graph]").count()) > 0, "the step graph above it still renders");
-    await fold.click();
-    await waitFor(async () => (await fold.getAttribute("aria-expanded")) === "true", "the block unfolds");
-    assert.equal(await block.getAttribute("data-pf-progress-block"), "open", "the open block carries its state");
-    await waitFor(async () => (await block.locator("[data-pf-progress-kind]").count()) === 4, "the lines render once unfolded");
-    assert.equal(await block.locator("[data-pf-progress-order]").count(), 1, "the order control is back");
-    assert.equal(await page.evaluate(() => localStorage.getItem("pi-web:polyforge-progress-expanded")), "true", "the choice is held in storage");
-    await fold.click();
-    await waitFor(async () => (await fold.getAttribute("aria-expanded")) === "false", "the block folds again");
-    assert.equal(await block.locator("[data-pf-progress-kind]").count(), 0, "folding hides the whole stream");
-    assert.equal(await page.evaluate(() => localStorage.getItem("pi-web:polyforge-progress-expanded")), "false", "the fold is held too");
-    // … and the stored choice survives a reload: a clean page (no clock — a
-    // paused clock would freeze the reload; the bootstrap seeds only an
-    // absent key), folded by hand, stays folded.
-    await withPage({}, async (clean) => {
-      clean.__progress.body = progressBody(bulkLines(4));
-      await openUI(clean);
-      const cleanBlock = progressBlock(clean);
-      await cleanBlock.waitFor({ timeout: UI_WAIT });
-      await waitFor(async () => (await cleanBlock.locator("[data-pf-progress-kind]").count()) === 4, "the seeded-open block renders its lines");
-      await cleanBlock.locator("[data-pf-progress-expand]").click();
-      await waitFor(async () => (await cleanBlock.locator("[data-pf-progress-expand]").getAttribute("aria-expanded")) === "false", "the block folds");
-      await clean.reload({ waitUntil: "domcontentloaded" });
-      await clean.getByText("E2E pf 238 host session").first().waitFor({ state: "attached", timeout: NAV_MS });
-      await openUI(clean);
-      const reloaded = progressBlock(clean);
-      await reloaded.waitFor({ timeout: UI_WAIT });
-      assert.equal(await reloaded.locator("[data-pf-progress-expand]").getAttribute("aria-expanded"), "false", "the stored fold choice survives the reload");
-      assert.equal(await reloaded.locator("[data-pf-progress-kind]").count(), 0, "no line renders behind the fold after the reload");
-    });
-  }));
 } catch (error) {
   failures.push("suite");
   console.log(`FAIL suite: ${String(error?.message ?? error).split("\n")[0]}`);
