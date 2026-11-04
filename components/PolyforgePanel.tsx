@@ -282,7 +282,13 @@ const NO_OPEN_STEPS: ReadonlySet<string> = Object.freeze(new Set<string>());
  */
 function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null; running: boolean; scrollRef: RefObject<HTMLDivElement | null> }) {
   const { t } = useI18n();
-  const snapshot = usePolyforgeProgress(wi, running);
+  // The unavailable state's own way out: a read generation the hook keys its
+  // cycle on (a bump re-runs the effect — one fresh read for a job not
+  // running, the 2 s cadence restarted for one that is). A not-running
+  // job's unavailable first read (N5) is otherwise final — no interval, no
+  // retry — and only deselecting the job would read again.
+  const [retryCount, setRetryCount] = useState(0);
+  const snapshot = usePolyforgeProgress(wi, running, retryCount);
   const { progressOrder, setProgressOrder } = usePolyforgeViewPreferences();
   const pinned = useRef(false);
   useEffect(() => {
@@ -357,7 +363,26 @@ function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null
         </button>
       </div>
       {!snapshot || message !== null ? (
-        <span style={{ color: "var(--text-dim)" }}>{message}</span>
+        <span style={{ color: "var(--text-dim)", minWidth: 0 }}>
+          {message}
+          {/* the retry, only where a read is possible to re-issue: an
+              unavailable snapshot with a wi (a selection without one has
+              nothing to re-read). A running job self-heals on its next
+              poll; this is for the one read a not-running job gets. */}
+          {wi && snapshot?.available === false && (
+            <>
+              {" · "}
+              <button
+                type="button"
+                data-pf-progress-retry=""
+                onClick={() => setRetryCount((count) => count + 1)}
+                style={{ padding: 0, background: "none", border: "none", color: "var(--accent)", cursor: "pointer", font: "inherit", lineHeight: "16px" }}
+              >
+                {t("polyforge.progress.retry")}
+              </button>
+            </>
+          )}
+        </span>
       ) : (
         <>
             {progressOrder === "asc" && snapshot.omitted > 0 && (

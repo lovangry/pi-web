@@ -1922,6 +1922,7 @@ export const zhTWLocale: LocalePlugin = {
     "polyforge.progress.title": "執行進度",
     "polyforge.progress.empty": "暫無進度",
     "polyforge.progress.unavailable": "進度不可用",
+    "polyforge.progress.retry": "重試",
     "polyforge.progress.omitted": "已省略更早的 {count} 行",
     "polyforge.progress.orderDesc": "最新在前（倒序）",
     "polyforge.progress.orderAsc": "最早在前（正序）",

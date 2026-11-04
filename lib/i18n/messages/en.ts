@@ -1916,6 +1916,7 @@ export const enLocale: LocalePlugin = {
     "polyforge.progress.title": "Execution progress",
     "polyforge.progress.empty": "No progress yet",
     "polyforge.progress.unavailable": "Progress unavailable",
+    "polyforge.progress.retry": "Retry",
     "polyforge.progress.omitted": "{count} earlier lines omitted",
     "polyforge.progress.orderDesc": "Newest first",
     "polyforge.progress.orderAsc": "Oldest first",
