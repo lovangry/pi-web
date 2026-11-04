@@ -99,8 +99,8 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onReorderTa
             aria-selected={isActive}
             aria-roledescription={t("tabs.reorderRoleDescription")}
             tabIndex={isActive || (!activeTabId && tabs[0].id === tab.id) ? 0 : -1}
-            draggable={dragHandlers.draggable}
-            onDragStart={dragHandlers.onDragStart}
+            draggable={onReorderTab ? dragHandlers.draggable : undefined}
+            onDragStart={onReorderTab ? dragHandlers.onDragStart : undefined}
             onDragOver={dragHandlers.onDragOver}
             onDragLeave={dragHandlers.onDragLeave}
             onDrop={dragHandlers.onDrop}

@@ -994,7 +994,6 @@ export function AppShell() {
   const handleReorderPanelTab = useCallback((draggedId: string, targetId: string, after: boolean) => {
     setPanelTabOrder((prev) => reorderById(prev, (tabId) => tabId, draggedId, targetId, after));
   }, []);
-
   useEffect(() => {
     try {
       const saved = restoreTerminalTabs(window.sessionStorage.getItem(TERMINAL_TABS_KEY));
@@ -1762,8 +1761,7 @@ export function AppShell() {
     setAgentTabs((prev) => {
       if (prev.some((tab) => tab.sessionId === sessionId)) return prev;
       return [...prev, { sessionId, label }];
-    });
-    setActiveFileTabId(`agent:${sessionId}`);
+    });    setActiveFileTabId(`agent:${sessionId}`);
     setRightPanelOpen(true);
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
@@ -3905,8 +3903,7 @@ export function AppShell() {
               activeTabId={activeFileTabId ?? ""}
               onSelectTab={setActiveFileTabId}
               onCloseTab={handleCloseFileTab}
-              onReorderTab={handleReorderPanelTab}
-            />
+              onReorderTab={handleReorderPanelTab}            />
           </div>
           <button
             type="button"
